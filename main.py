@@ -666,7 +666,6 @@ def get_duplicates(
 
 # ── DEBUG ENDPOINT ────────────────────────────────────────────────────────────
 
-
 @app.get("/debug")
 def debug():
     results = {}
