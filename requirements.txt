@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+transformers
+torch
+pandas
+python-multipart
+wordcloud
+matplotlib
+huggingface_hub
+scipy
+numpy
+streamlit
+requests
+plotly
+pillow
