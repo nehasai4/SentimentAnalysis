@@ -29,7 +29,7 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_DATASETS_OFFLINE"] = "1"
 
 from sentiment_model import predict_sentiment, predict_sentiment_batch
-from product_detection import detect_product
+from product_detection import detect_product, detect_product_full
 from fake_review import detect_fake, detect_fake_explained
 from Duplicatedetection import detect_duplicates
 
@@ -127,8 +127,12 @@ def _safe_unpack(value: Any, fallback_label: str, fallback_score: float = 0.0) -
 
 
 def _detect_product_batch(texts: list[str]) -> list[tuple]:
-    """Run detect_product over a list and return list of (label, score) tuples."""
-    return [_safe_unpack(detect_product(t), "General", 0) for t in texts]
+    """Run detect_product_full over a list and return list of (category, sub_category) tuples."""
+    results = []
+    for t in texts:
+        r = detect_product_full(t)
+        results.append((r.category, r.sub_category))
+    return results
 
 
 def _detect_fake_batch(texts: list[str]) -> list[tuple]:
@@ -189,32 +193,36 @@ def _analyse_single(text: str) -> dict:
     """
     sentiment, sent_score = _safe_unpack(predict_sentiment(text), "Neutral", 0.0)
     emotion               = "Neutral"   # Emotion model disabled
-    product, _            = _safe_unpack(detect_product(text), "General", 0)
+    prod_result           = detect_product_full(text)
+    product               = prod_result.category
+    sub_category          = prod_result.sub_category
 
     # Use the explained variant so the UI gets the reasons list
     fake_label, fake_score, fake_reasons = detect_fake_explained(text)
 
     return {
-        "review":       text,
-        "sentiment":    sentiment,
-        "emotion":      emotion,
-        "product":      product,
-        "fake_review":  fake_label,
-        "confidence":   round(float(sent_score), 4),   # 0.0–1.0
-        "fake_score":   round(float(fake_score), 4),   # 0.0–1.0
-        "fake_reasons": fake_reasons,                  # list[dict] for UI
+        "review":        text,
+        "sentiment":     sentiment,
+        "emotion":       emotion,
+        "product":       product,
+        "sub_category":  sub_category,
+        "fake_review":   fake_label,
+        "confidence":    round(float(sent_score), 4),   # 0.0–1.0
+        "fake_score":    round(float(fake_score), 4),   # 0.0–1.0
+        "fake_reasons":  fake_reasons,                  # list[dict] for UI
     }
 
 
 def _build_error_row(review: str) -> dict:
     return {
-        "review":      review,
-        "sentiment":   "Error",
-        "emotion":     "Error",
-        "product":     "Unknown",
-        "fake_review": "Unknown",
-        "confidence":  0.0,
-        "fake_score":  0.0,
+        "review":       review,
+        "sentiment":    "Error",
+        "emotion":      "Error",
+        "product":      "Unknown",
+        "sub_category": "Unknown",
+        "fake_review":  "Unknown",
+        "confidence":   0.0,
+        "fake_score":   0.0,
     }
 
 
@@ -385,7 +393,7 @@ def _process_batch(reviews: list[str]) -> None:
                 products = future_product.result(timeout=120)
             except Exception as e:
                 print(f"[WARN] Product batch {batch_start} failed: {e}")
-                products = [("General", 0)] * len(batch)
+                products = [("General", "General")] * len(batch)
 
             try:
                 fakes = future_fake.result(timeout=120)
@@ -397,19 +405,20 @@ def _process_batch(reviews: list[str]) -> None:
             batch_results = []
             for j, review in enumerate(batch):
                 try:
-                    product,   _          = products[j]
-                    fake,      fake_score = fakes[j]
-                    sentiment, sent_score = _safe_unpack(raw_sentiments[j], "Neutral", 0.0)
-                    emotion               = raw_emotions[j]
+                    product_cat, product_sub = products[j]
+                    fake,      fake_score    = fakes[j]
+                    sentiment, sent_score    = _safe_unpack(raw_sentiments[j], "Neutral", 0.0)
+                    emotion                  = raw_emotions[j]
 
                     batch_results.append({
-                        "review":      review,
-                        "sentiment":   sentiment,
-                        "emotion":     emotion,
-                        "product":     product,
-                        "fake_review": fake,
-                        "confidence":  round(float(sent_score), 4),  # 0.0–1.0
-                        "fake_score":  round(float(fake_score), 4),  # 0.0–1.0
+                        "review":       review,
+                        "sentiment":    sentiment,
+                        "emotion":      emotion,
+                        "product":      product_cat,
+                        "sub_category": product_sub,
+                        "fake_review":  fake,
+                        "confidence":   round(float(sent_score), 4),  # 0.0–1.0
+                        "fake_score":   round(float(fake_score), 4),  # 0.0–1.0
                     })
 
                 except Exception as e:
@@ -656,11 +665,28 @@ def get_duplicates(
         )
 
     reviews = [r.get("review", "") for r in results]
-    report  = detect_duplicates(
-        reviews,
-        near_threshold=near_threshold,
-        sem_threshold=sem_threshold,
-    )
+
+    DEDUP_TIMEOUT = 90  # seconds — generous for 50k rows but won't hang forever
+
+    try:
+        future = _model_executor.submit(
+            detect_duplicates,
+            reviews,
+            near_threshold,
+            sem_threshold,
+        )
+        report = future.result(timeout=DEDUP_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"Duplicate detection timed out after {DEDUP_TIMEOUT}s. "
+                "Try a smaller dataset or raise the similarity thresholds."
+            ),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Duplicate detection failed: {str(e)}")
+
     return report
 
 
