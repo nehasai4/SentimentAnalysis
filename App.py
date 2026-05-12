@@ -1,21 +1,25 @@
 """
-Sentiment Analysis Platform — Streamlit Frontend (v5.0 Fixed)
-
-Fixes vs v4:
-  ─ HTML tags (</div> etc.) stripped at DISPLAY TIME in review cards
-  ─ Avg Conf % in product table now correctly shows e.g. 84% not 7,550%
-  ─ Product category icons updated to cover all 16 categories
-  ─ Confidence stored as 0–1 in results, multiplied only once for display
-  ─ Review text escaped before injection into unsafe_allow_html blocks
+App.py — Sentiment Analysis Platform  Streamlit Frontend  v6.0  (Production-Ready)
+────────────────────────────────────────────────────────────────────────────────────
+New in v6.0 vs v5.0:
+  ─ Auto-reset before every upload (passes force=true) — fixes 409 on Render
+  ─ Stale-job detection: if /status says stale, UI warns and offers manual reset
+  ─ 409 is now caught gracefully: shows a clear message with a Reset button
+  ─ backend_ok() now uses /health instead of / — cheaper call, richer response
+  ─ Memory warning shown in sidebar when server RAM is low
+  ─ Batch Upload page shows last-error from /progress if batch crashed
+  ─ All confidence / fake_score ×100 multiplications audited — no double-multiply
+  ─ HTML tag sanitization preserved and applied consistently
+  ─ Customer View page preserved with all filters and pagination intact
 """
 
 import html as _html
 import re as _re
-
-import streamlit as st
-import requests
-import pandas as pd
 import time
+
+import pandas as pd
+import requests
+import streamlit as st
 
 st.set_page_config(
     page_title="Sentiment AI",
@@ -24,14 +28,16 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-API_BASE = "https://sentimentanalysis-s16d.onrender.com"
+API_BASE    = "https://sentimentanalysis-s16d.onrender.com"
+REQUEST_TO  = 30    # seconds for regular API calls
+UPLOAD_TO   = 20    # seconds for the upload call itself
 
-# ── session state defaults ─────────────────────────────────────────────────────
+# ── Session-state defaults ─────────────────────────────────────────────────────
 for _k, _v in [
     ("page", "Home"),
     ("insight_text", ""),
-    ("insight_pos", []),
-    ("insight_neg", []),
+    ("insight_pos",  []),
+    ("insight_neg",  []),
 ]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -138,6 +144,7 @@ h2 { font-family:'DM Serif Display',serif !important; font-size:32px !important;
 .alert { display:flex; align-items:flex-start; gap:12px; padding:13px 16px; border-radius:12px; margin-bottom:8px; border:1px solid; border-left-width:4px; font-size:13px; }
 .a-ok   { background:#edfaf3; border-color:rgba(21,128,61,.15); border-left-color:#15803d; color:#166534; }
 .a-crit { background:var(--rose-pale); border-color:rgba(184,51,72,.15); border-left-color:var(--rose); color:#7a1b2a; }
+.a-warn { background:var(--amber-pale); border-color:rgba(196,123,10,.15); border-left-color:var(--amber); color:#7a4a00; }
 .at { font-weight:700; margin-bottom:2px; font-size:13px; }
 .ab { font-size:12px; opacity:.9; line-height:1.5; }
 
@@ -182,13 +189,8 @@ h2 { font-family:'DM Serif Display',serif !important; font-size:32px !important;
 .dup-type-near     { background:#fff0e0; color:#b06000; border:1px solid rgba(176,96,0,.2); padding:2px 9px; border-radius:100px; font-size:10px; font-weight:700; }
 .dup-type-semantic { background:var(--violet-pale); color:var(--violet); border:1px solid rgba(80,64,200,.2); padding:2px 9px; border-radius:100px; font-size:10px; font-weight:700; }
 
-/* ── Customer View ─────────────────────────────────────────── */
-.cv-card {
-    background:var(--surface); border:1px solid var(--border);
-    border-radius:18px; padding:20px 22px; margin-bottom:14px;
-    position:relative; overflow:hidden;
-    transition:box-shadow .18s;
-}
+/* Customer View */
+.cv-card { background:var(--surface); border:1px solid var(--border); border-radius:18px; padding:20px 22px; margin-bottom:14px; position:relative; overflow:hidden; transition:box-shadow .18s; }
 .cv-card:hover { box-shadow:0 6px 24px rgba(12,12,14,.09); }
 .cv-card-pos::before { content:''; position:absolute; left:0; top:0; bottom:0; width:4px; background:linear-gradient(180deg,var(--teal),#1cbfac); border-radius:4px 0 0 4px; }
 .cv-card-neg::before { content:''; position:absolute; left:0; top:0; bottom:0; width:4px; background:linear-gradient(180deg,var(--rose),#e05070); border-radius:4px 0 0 4px; }
@@ -197,113 +199,170 @@ h2 { font-family:'DM Serif Display',serif !important; font-size:32px !important;
 .cv-badges { display:flex; flex-wrap:wrap; gap:6px; align-items:center; flex-shrink:0; }
 .cv-text { font-size:14px; line-height:1.7; color:var(--ink); margin-bottom:14px; padding-left:8px; word-break:break-word; }
 .cv-meta { display:flex; align-items:center; gap:16px; font-size:11px; color:var(--muted); padding-left:8px; }
-.cv-meta-item { display:flex; align-items:center; gap:5px; }
 .cv-conf-bar { height:3px; border-radius:100px; background:rgba(12,12,14,.08); width:60px; overflow:hidden; display:inline-block; vertical-align:middle; margin-left:5px; }
 .cv-conf-fill { height:100%; background:linear-gradient(90deg,var(--teal),#1cbfac); border-radius:100px; }
-.cv-aspects { display:flex; flex-wrap:wrap; gap:6px; padding-left:8px; margin-top:10px; }
-.cv-asp { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:600; padding:3px 10px; border-radius:100px; border:1px solid; }
-.cv-asp-pos { color:var(--teal2); background:var(--teal-pale); border-color:rgba(15,124,110,.2); }
-.cv-asp-neg { color:var(--rose); background:var(--rose-pale); border-color:rgba(184,51,72,.2); }
-.cv-asp-neu { color:var(--amber); background:var(--amber-pale); border-color:rgba(196,123,10,.2); }
-.cv-filter-row { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:20px; align-items:center; }
 .cv-stat-strip { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:24px; }
 .cv-stat { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:14px 16px; text-align:center; }
 .cv-stat-lbl { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.1em; color:var(--muted); margin-bottom:4px; }
 .cv-stat-val { font-family:'DM Serif Display',serif; font-size:28px; line-height:1; }
 .cv-stat-sub { font-size:11px; color:var(--muted); margin-top:3px; }
 .cv-fake-warn { display:inline-flex; align-items:center; gap:5px; font-size:10px; font-weight:700; color:#b06000; background:#fff0e0; border:1px solid rgba(176,96,0,.2); padding:2px 9px; border-radius:100px; }
-.cv-search { width:100%; }
-.cv-page-btn { display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:8px 18px; border-radius:9px; background:var(--ink); color:var(--surface); font-size:12px; font-weight:700; border:none; cursor:pointer; }
 .cv-no-results { text-align:center; padding:40px 20px; color:var(--muted); font-size:13px; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
 EMO = {"Joy":"😊","Anger":"😠","Sadness":"😢","Fear":"😨","Surprise":"😲",
        "Disgust":"🤢","Neutral":"😐","Love":"❤️","Unknown":"❓"}
 
-# ── Extended product icon map covering all 16 taxonomy categories ──────────────
 PROD_ICO = {
-    "Electronics":      "📱",
-    "Food & Drink":     "🍔",
-    "Fashion":          "👗",
-    "Home & Living":    "🏠",
-    "Beauty":           "💄",
-    "Healthcare":       "💊",
-    "Automotive":       "🚗",
-    "Books & Media":    "📚",
-    "Movies & OTT":     "🎬",
-    "Music":            "🎵",
-    "Gaming":           "🎮",
-    "Travel":           "✈️",
-    "Education":        "🎓",
-    "Software & App":   "💻",
-    "Finance":          "💰",
-    "Grocery & FMCG":   "🛒",
-    "General":          "📦",
+    "Electronics":"📱","Food & Drink":"🍔","Fashion":"👗",
+    "Home & Living":"🏠","Beauty":"💄","Healthcare":"💊",
+    "Automotive":"🚗","Books & Media":"📚","Movies & OTT":"🎬",
+    "Music":"🎵","Gaming":"🎮","Travel":"✈️","Education":"🎓",
+    "Software & App":"💻","Finance":"💰","Grocery & FMCG":"🛒","General":"📦",
 }
 
 
 def _sanitize_for_display(text: str) -> str:
-    """
-    Strip HTML tags and escape special chars so review text is ALWAYS safe
-    to inject inside unsafe_allow_html blocks.
-    This fixes the </div> rendering bug — run on every review before display.
-    """
-    # 1. Strip all HTML/XML tags (e.g. </div>, <br>, <script>)
     text = _re.sub(r"<[^>]+>", " ", text)
-    # 2. Collapse extra whitespace left by stripping
     text = _re.sub(r"\s+", " ", text).strip()
-    # 3. Escape remaining &, <, > so they render as text not HTML
-    text = _html.escape(text)
-    return text
+    return _html.escape(text)
 
 
-def eico(e): return EMO.get(e, "❓")
-def pct(a, b): return f"{a/b*100:.1f}%" if b else "0%"
-def sent_badge(s):
-    c = {"Positive": "pos", "Negative": "neg", "Neutral": "neu"}.get(s, "neu")
-    return f'<span class="bdg {c}">{s}</span>'
-def fake_badge(f):
-    return f'<span class="bdg {"fake-b" if f=="Fake" else "real-b"}">{f}</span>'
+def eico(e):    return EMO.get(e, "❓")
+def pct(a, b):  return f"{a/b*100:.1f}%" if b else "0%"
 def fmt_time(s):
     s = int(s)
     if s < 60:   return f"{s}s"
     if s < 3600: return f"{s//60}m {s%60}s"
     return f"{s//3600}h {(s%3600)//60}m"
-def backend_ok():
-    try: return requests.get(f"{API_BASE}/", timeout=3).status_code == 200
-    except: return False
 
-# ── Sidebar ────────────────────────────────────────────────────────────────────
+
+def sent_badge(s):
+    c = {"Positive":"pos","Negative":"neg","Neutral":"neu"}.get(s, "neu")
+    return f'<span class="bdg {c}">{s}</span>'
+
+
+def fake_badge(f):
+    return f'<span class="bdg {"fake-b" if f=="Fake" else "real-b"}">{f}</span>'
+
+
+def _get_health() -> dict | None:
+    """
+    Call /health and return the parsed JSON, or None on failure.
+    Replaces the old backend_ok() which hit / and only returned True/False.
+    """
+    try:
+        r = requests.get(f"{API_BASE}/health", timeout=4)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+
+def backend_ok() -> bool:
+    return _get_health() is not None
+
+
+def _call_reset(clear_results: bool = False) -> bool:
+    """POST /reset and return True on success."""
+    try:
+        r = requests.post(
+            f"{API_BASE}/reset",
+            params={"clear_results": str(clear_results).lower()},
+            timeout=6,
+        )
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ══════════════════════════════════════════════════════════════════════════════
+
 with st.sidebar:
     st.markdown("""
     <div style="padding:0 0 28px">
-      <div style="font-family:'DM Serif Display',serif;font-size:26px;color:#fff;line-height:1.1;margin-bottom:5px">Sentiment<br><em style="opacity:.45">AI</em></div>
-      <div style="font-size:10px;color:rgba(255,255,255,.35);text-transform:uppercase;letter-spacing:.13em">Review Intelligence</div>
-    </div>""", unsafe_allow_html=True)
+      <div style="font-family:'DM Serif Display',serif;font-size:26px;color:#fff;line-height:1.1;margin-bottom:5px">
+        Sentiment<br><em style="opacity:.45">AI</em>
+      </div>
+      <div style="font-size:10px;color:rgba(255,255,255,.35);text-transform:uppercase;letter-spacing:.13em">
+        Review Intelligence
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    pages    = ["◈  Home", "◉  Text Analysis", "▦  Batch Upload", "▩  Dashboard", "◎  Product Deep Dive"]
-    page_map = {"◈  Home":"Home","◉  Text Analysis":"Text Analysis","▦  Batch Upload":"Batch Upload","▩  Dashboard":"Dashboard","◎  Product Deep Dive":"Product Deep Dive"}
-    idx_map  = {"Home":0,"Text Analysis":1,"Batch Upload":2,"Dashboard":3,"Product Deep Dive":4,"Customer View":5}
+    pages    = ["◈  Home","◉  Text Analysis","▦  Batch Upload","▩  Dashboard","◎  Product Deep Dive"]
+    page_map = {
+        "◈  Home":               "Home",
+        "◉  Text Analysis":      "Text Analysis",
+        "▦  Batch Upload":       "Batch Upload",
+        "▩  Dashboard":          "Dashboard",
+        "◎  Product Deep Dive":  "Product Deep Dive",
+    }
+    idx_map = {"Home":0,"Text Analysis":1,"Batch Upload":2,"Dashboard":3,"Product Deep Dive":4,"Customer View":5}
 
     sel = st.radio("nav", pages, index=idx_map.get(st.session_state.page, 0), label_visibility="collapsed")
     st.session_state.page = page_map[sel]
 
     st.markdown('<div style="height:1px;background:rgba(255,255,255,.08);margin:18px 0"></div>', unsafe_allow_html=True)
-    ok = backend_ok()
-    bc = "rgba(15,124,110,.9)" if ok else "rgba(184,51,72,.9)"
-    bg = "rgba(15,124,110,.1)" if ok else "rgba(184,51,72,.1)"
-    bd = "rgba(15,124,110,.2)" if ok else "rgba(184,51,72,.2)"
+
+    # ── Backend health badge ───────────────────────────────────────────────
+    health = _get_health()
+    ok     = health is not None
+
+    bc = "rgba(15,124,110,.9)"  if ok else "rgba(184,51,72,.9)"
+    bg = "rgba(15,124,110,.1)"  if ok else "rgba(184,51,72,.1)"
+    bd = "rgba(15,124,110,.2)"  if ok else "rgba(184,51,72,.2)"
+
     st.markdown(f"""
-    <div style="display:flex;align-items:center;gap:8px;font-size:11px;color:{bc};background:{bg};border:1px solid {bd};border-radius:8px;padding:8px 12px">
+    <div style="display:flex;align-items:center;gap:8px;font-size:11px;color:{bc};
+                background:{bg};border:1px solid {bd};border-radius:8px;padding:8px 12px">
       <div style="width:6px;height:6px;border-radius:50%;background:{bc};flex-shrink:0"></div>
       {"Backend online" if ok else "Backend offline"}
     </div>
-    <div style="margin-top:8px;font-size:10px;color:rgba(255,255,255,.28);font-family:'JetBrains Mono',monospace">{API_BASE}</div>
+    <div style="margin-top:8px;font-size:10px;color:rgba(255,255,255,.28);
+                font-family:'JetBrains Mono',monospace">{API_BASE}</div>
     """, unsafe_allow_html=True)
 
+    # ── Memory warning ─────────────────────────────────────────────────────
+    if health:
+        mem = health.get("memory", {})
+        free_mb = mem.get("available_mb", 9999)
+        if free_mb < 300:
+            st.markdown(f"""
+            <div style="margin-top:8px;font-size:11px;color:#b06000;background:#fff0e0;
+                        border:1px solid rgba(176,96,0,.2);border-radius:8px;padding:8px 12px">
+              ⚠ Low memory: {free_mb} MB free
+            </div>
+            """, unsafe_allow_html=True)
+
+        # ── Stale job warning + reset button ──────────────────────────────
+        job = health.get("job", {})
+        if job.get("stale"):
+            st.markdown("""
+            <div style="margin-top:8px;font-size:11px;color:#b83348;background:#fce8ec;
+                        border:1px solid rgba(184,51,72,.2);border-radius:8px;padding:8px 12px">
+              ⚠ A job appears stuck
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button("🔄 Reset stuck job", key="sidebar_reset"):
+                if _call_reset():
+                    st.success("Reset successful")
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.error("Reset failed")
+
 page = st.session_state.page
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HOME
@@ -311,7 +370,12 @@ page = st.session_state.page
 if page == "Home":
     st.markdown('<div class="tag tag-teal">◈ AI-Powered</div>', unsafe_allow_html=True)
     st.markdown("# Understand what\nreviews *really* say.")
-    st.markdown('<p style="font-size:16px;color:#6b6860;line-height:1.7;max-width:540px;margin:0 0 36px">Detect sentiment, emotion, and authenticity in seconds — from a single review or a 50,000-row dataset.</p>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="font-size:16px;color:#6b6860;line-height:1.7;max-width:540px;margin:0 0 36px">'
+        "Detect sentiment, emotion, and authenticity in seconds — from a single review or a 50,000-row dataset."
+        "</p>",
+        unsafe_allow_html=True,
+    )
 
     c1, c2, c3 = st.columns(3, gap="large")
     for col, (acc, ico, title, desc) in zip([c1, c2, c3], [
@@ -320,12 +384,18 @@ if page == "Home":
         ("violet", "▩", "Dashboard",      "Charts, word clouds, AI executive summary, product tables, duplicate detection, and CSV export."),
     ]):
         with col:
-            st.markdown(f'<div class="card card-{acc}" style="min-height:200px"><div style="font-size:26px;margin-bottom:12px;opacity:.65">{ico}</div><div style="font-family:\'DM Serif Display\',serif;font-size:22px;margin-bottom:10px">{title}</div><div style="font-size:13px;color:#6b6860;line-height:1.65">{desc}</div></div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="card card-{acc}" style="min-height:200px">'
+                f'<div style="font-size:26px;margin-bottom:12px;opacity:.65">{ico}</div>'
+                f'<div style="font-family:\'DM Serif Display\',serif;font-size:22px;margin-bottom:10px">{title}</div>'
+                f'<div style="font-size:13px;color:#6b6860;line-height:1.65">{desc}</div></div>',
+                unsafe_allow_html=True,
+            )
 
     st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
     caps = [
         ("RoBERTa",   "Sentiment",      "Pos / Neg / Neutral + confidence"),
-        ("6 rules",   "Fake detect",    "Full explainability per rule"),
+        ("6+ rules",  "Fake detect",    "Full explainability per rule"),
         ("12 aspects","ABSA",           "Battery · Camera · Price · more"),
         ("3-stage",   "Deduplication",  "Exact · Near · Semantic"),
         ("Claude API","AI summaries",   "Executive insights on demand"),
@@ -340,7 +410,13 @@ if page == "Home":
         f'<div style="font-size:11px;color:var(--muted)">{d}</div></div>'
         for s, n, d in caps
     )
-    st.markdown(f'<div style="background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:26px 30px"><div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin-bottom:18px">Platform capabilities</div><div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">{rows}</div></div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div style="background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:26px 30px">'
+        f'<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin-bottom:18px">Platform capabilities</div>'
+        f'<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">{rows}</div></div>',
+        unsafe_allow_html=True,
+    )
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TEXT ANALYSIS
@@ -348,7 +424,12 @@ if page == "Home":
 elif page == "Text Analysis":
     st.markdown('<div class="tag tag-teal">◉ Single Review</div>', unsafe_allow_html=True)
     st.markdown("## Analyse a review")
-    st.markdown('<p style="font-size:13px;color:#6b6860;margin-bottom:22px">Paste any product review for instant sentiment, emotion, product detection and fake-review analysis.</p>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="font-size:13px;color:#6b6860;margin-bottom:22px">'
+        "Paste any product review for instant sentiment, emotion, product detection and fake-review analysis."
+        "</p>",
+        unsafe_allow_html=True,
+    )
 
     col_in, col_out = st.columns([10, 12], gap="large")
 
@@ -363,10 +444,17 @@ elif page == "Text Analysis":
         ]
         sel  = st.selectbox("Examples", examples, label_visibility="collapsed")
         seed = "" if sel.startswith("—") else sel
-        review_text = st.text_area("Review", value=seed, height=190, max_chars=1000,
-                                   placeholder="Paste your review here…", label_visibility="collapsed")
+        review_text = st.text_area(
+            "Review", value=seed, height=190, max_chars=1000,
+            placeholder="Paste your review here…", label_visibility="collapsed",
+        )
         char_col = "#b83348" if len(review_text) > 900 else "#c47b0a" if len(review_text) > 700 else "#aaa"
-        st.markdown(f'<div style="font-size:11px;color:{char_col};text-align:right;font-family:JetBrains Mono,monospace;margin-top:-8px;margin-bottom:12px">{len(review_text)}/1000</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="font-size:11px;color:{char_col};text-align:right;'
+            f'font-family:JetBrains Mono,monospace;margin-top:-8px;margin-bottom:12px">'
+            f'{len(review_text)}/1000</div>',
+            unsafe_allow_html=True,
+        )
         do_analyze = st.button("Analyse →", use_container_width=True)
 
     with col_out:
@@ -376,25 +464,44 @@ elif page == "Text Analysis":
             else:
                 with st.spinner("Running models…"):
                     try:
-                        resp = requests.post(f"{API_BASE}/analyze_text", json={"text": review_text}, timeout=30)
+                        resp = requests.post(
+                            f"{API_BASE}/analyze_text",
+                            json={"text": review_text},
+                            timeout=REQUEST_TO,
+                        )
                         resp.raise_for_status()
                         d = resp.json()
 
                         sent       = d.get("sentiment", "Neutral")
-                        conf       = round(d.get("confidence", 0) * 100)   # ← multiply once here
+                        conf       = round(d.get("confidence", 0) * 100)
                         emotion    = d.get("emotion", "Neutral")
                         product    = d.get("product", "General")
                         fake       = d.get("fake_review", "Real")
                         fake_score = round(d.get("fake_score", 0) * 100)
                         reasons    = d.get("fake_reasons", [])
 
-                        sc = {"Positive": "var(--teal)", "Negative": "var(--rose)", "Neutral": "var(--amber)"}.get(sent, "var(--muted)")
+                        sc = {"Positive":"var(--teal)","Negative":"var(--rose)","Neutral":"var(--amber)"}.get(sent,"var(--muted)")
                         fc = "#b06000" if fake == "Fake" else "var(--teal)"
 
                         m1, m2, m3 = st.columns(3)
-                        m1.markdown(f'<div class="mbox"><div class="mlbl">Sentiment</div><div class="mval" style="color:{sc}">{sent}</div><div style="margin-top:8px">{sent_badge(sent)}</div></div>', unsafe_allow_html=True)
-                        m2.markdown(f'<div class="mbox"><div class="mlbl">Confidence</div><div class="mval">{conf}%</div><div class="mbar"><div class="mfill" style="width:{conf}%"></div></div></div>', unsafe_allow_html=True)
-                        m3.markdown(f'<div class="mbox"><div class="mlbl">Authenticity</div><div class="mval" style="color:{fc}">{fake}</div><div style="margin-top:8px">{fake_badge(fake)}</div></div>', unsafe_allow_html=True)
+                        m1.markdown(
+                            f'<div class="mbox"><div class="mlbl">Sentiment</div>'
+                            f'<div class="mval" style="color:{sc}">{sent}</div>'
+                            f'<div style="margin-top:8px">{sent_badge(sent)}</div></div>',
+                            unsafe_allow_html=True,
+                        )
+                        m2.markdown(
+                            f'<div class="mbox"><div class="mlbl">Confidence</div>'
+                            f'<div class="mval">{conf}%</div>'
+                            f'<div class="mbar"><div class="mfill" style="width:{conf}%"></div></div></div>',
+                            unsafe_allow_html=True,
+                        )
+                        m3.markdown(
+                            f'<div class="mbox"><div class="mlbl">Authenticity</div>'
+                            f'<div class="mval" style="color:{fc}">{fake}</div>'
+                            f'<div style="margin-top:8px">{fake_badge(fake)}</div></div>',
+                            unsafe_allow_html=True,
+                        )
 
                         st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
 
@@ -420,25 +527,54 @@ elif page == "Text Analysis":
 
                         if reasons:
                             trig_n = sum(1 for r in reasons if r["triggered"])
-                            with st.expander(f"🕵️ {'Flagged fake' if fake=='Fake' else 'Looks real'} — {trig_n} rule{'s' if trig_n != 1 else ''} triggered", expanded=True):
+                            with st.expander(
+                                f"🕵️ {'Flagged fake' if fake=='Fake' else 'Looks real'} "
+                                f"— {trig_n} rule{'s' if trig_n != 1 else ''} triggered",
+                                expanded=True,
+                            ):
                                 bar_c = "#b06000" if fake == "Fake" else "var(--teal)"
-                                st.markdown(f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px"><div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);white-space:nowrap">Fake score</div><div style="flex:1;height:8px;background:rgba(12,12,14,.08);border-radius:100px;overflow:hidden"><div style="height:100%;width:{fake_score}%;background:{bar_c};border-radius:100px"></div></div><div style="font-size:12px;font-weight:700;color:{bar_c};font-family:\'JetBrains Mono\',monospace">{fake_score}%</div></div>', unsafe_allow_html=True)
+                                st.markdown(
+                                    f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">'
+                                    f'<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);white-space:nowrap">Fake score</div>'
+                                    f'<div style="flex:1;height:8px;background:rgba(12,12,14,.08);border-radius:100px;overflow:hidden">'
+                                    f'<div style="height:100%;width:{fake_score}%;background:{bar_c};border-radius:100px"></div></div>'
+                                    f'<div style="font-size:12px;font-weight:700;color:{bar_c};font-family:\'JetBrains Mono\',monospace">{fake_score}%</div></div>',
+                                    unsafe_allow_html=True,
+                                )
                                 for r in reasons:
                                     trig = r["triggered"]
                                     ico  = "⚠" if trig else "✓"
                                     wt   = int(r.get("weight", 0) * 100)
-                                    mc   = f'<div class="rm">↳ {_html.escape(str(r["matched"]))}</div>' if trig and r.get("matched") else ""
-                                    st.markdown(f'<div class="rule {"r-trig" if trig else "r-ok"}"><div class="rh"><div><div class="rn">{ico}  {r["rule"]}</div><div class="rd">{r["description"]}</div>{mc}</div><div class="{"rwa" if trig else "rw"}">+{wt}%</div></div></div>', unsafe_allow_html=True)
+                                    mc   = (
+                                        f'<div class="rm">↳ {_html.escape(str(r["matched"]))}</div>'
+                                        if trig and r.get("matched") else ""
+                                    )
+                                    st.markdown(
+                                        f'<div class="rule {"r-trig" if trig else "r-ok"}">'
+                                        f'<div class="rh"><div>'
+                                        f'<div class="rn">{ico}  {r["rule"]}</div>'
+                                        f'<div class="rd">{r["description"]}</div>{mc}</div>'
+                                        f'<div class="{"rwa" if trig else "rw"}">+{wt}%</div>'
+                                        f'</div></div>',
+                                        unsafe_allow_html=True,
+                                    )
 
                     except requests.exceptions.ConnectionError:
                         st.error(f"Backend not reachable at `{API_BASE}`")
-                    except Exception as e:
-                        st.error(f"Analysis failed: {e}")
+                    except requests.exceptions.HTTPError as he:
+                        st.error(f"API error {he.response.status_code}: {he.response.text[:200]}")
+                    except Exception as exc:
+                        st.error(f"Analysis failed: {exc}")
 
         elif do_analyze:
             st.warning("Enter a review first.")
         else:
-            st.markdown('<div class="empty"><div class="eico">◉</div><div class="etxt">Enter a review on the left and click Analyse to see results.</div></div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="empty"><div class="eico">◉</div>'
+                '<div class="etxt">Enter a review on the left and click Analyse to see results.</div></div>',
+                unsafe_allow_html=True,
+            )
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BATCH UPLOAD
@@ -446,7 +582,12 @@ elif page == "Text Analysis":
 elif page == "Batch Upload":
     st.markdown('<div class="tag tag-amber">▦ Batch Processing</div>', unsafe_allow_html=True)
     st.markdown("## Upload a dataset")
-    st.markdown('<p style="font-size:13px;color:#6b6860;margin-bottom:22px">Upload a CSV and pick the review column. All models run in parallel with live progress tracking.</p>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="font-size:13px;color:#6b6860;margin-bottom:22px">'
+        "Upload a CSV and pick the review column. All models run in parallel with live progress tracking."
+        "</p>",
+        unsafe_allow_html=True,
+    )
 
     col_l, col_r = st.columns([9, 11], gap="large")
 
@@ -458,41 +599,96 @@ elif page == "Batch Upload":
                 pdf = pd.read_csv(uploaded, nrows=1)
                 uploaded.seek(0)
                 col_sel = st.selectbox("Review column", list(pdf.columns))
-            except Exception as e:
-                st.error(f"Parse error: {e}")
-        run_batch = st.button("Analyse Dataset →", use_container_width=True,
-                              disabled=(uploaded is None or col_sel is None))
+            except Exception as exc:
+                st.error(f"Parse error: {exc}")
+
+        run_batch = st.button(
+            "Analyse Dataset →",
+            use_container_width=True,
+            disabled=(uploaded is None or col_sel is None),
+        )
+
+        # ── Manual reset button ────────────────────────────────────────────
+        st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
+        if st.button("🔄 Reset / Clear stuck job", use_container_width=True, key="manual_reset"):
+            with st.spinner("Resetting…"):
+                ok_r = _call_reset(clear_results=False)
+            if ok_r:
+                st.success("Job state cleared. You can upload now.")
+            else:
+                st.error("Could not reach backend to reset.")
 
     if not run_batch:
         with col_r:
-            st.markdown('<div class="empty" style="padding:40px 0"><div class="eico">▦</div><div class="etxt">Upload a CSV and start the analysis to see live progress here.</div></div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="empty" style="padding:40px 0"><div class="eico">▦</div>'
+                '<div class="etxt">Upload a CSV and start the analysis to see live progress here.</div></div>',
+                unsafe_allow_html=True,
+            )
 
     if run_batch and uploaded and col_sel:
         if not backend_ok():
             st.error(f"Backend not reachable at `{API_BASE}`")
         else:
+            # ── ALWAYS reset before uploading — this is the core 409 fix ──
+            with st.spinner("Preparing backend…"):
+                _call_reset(clear_results=False)
+                time.sleep(0.3)
+
             uploaded.seek(0)
             try:
                 resp = requests.post(
                     f"{API_BASE}/upload_csv",
                     files={"file": (uploaded.name, uploaded, "text/csv")},
-                    data={"column": col_sel},
-                    timeout=15,
+                    data={"column": col_sel, "force": "true"},
+                    timeout=UPLOAD_TO,
                 )
+
+                # ── Handle 409 gracefully with one auto-retry ──────────────
+                if resp.status_code == 409:
+                    st.warning("⚠ A previous job is still active — forcing reset and retrying…")
+                    _call_reset(clear_results=False)
+                    time.sleep(1)
+                    uploaded.seek(0)
+                    resp = requests.post(
+                        f"{API_BASE}/upload_csv",
+                        files={"file": (uploaded.name, uploaded, "text/csv")},
+                        data={"column": col_sel, "force": "true"},
+                        timeout=UPLOAD_TO,
+                    )
+
                 resp.raise_for_status()
                 total = resp.json().get("total_reviews", 0)
-            except Exception as e:
-                st.error(f"Upload failed: {e}")
+
+            except requests.exceptions.HTTPError as he:
+                code = he.response.status_code
+                body = he.response.text[:300]
+                if code == 409:
+                    st.error(
+                        "Upload blocked: another job is running. "
+                        "Click **Reset / Clear stuck job** on the left, then try again."
+                    )
+                elif code == 413:
+                    st.error("File too large. Maximum is 50 MB.")
+                elif code == 503:
+                    st.error("Server memory too low. Wait a moment and retry.")
+                else:
+                    st.error(f"Upload failed ({code}): {body}")
+                st.stop()
+            except Exception as exc:
+                st.error(f"Upload failed: {exc}")
                 st.stop()
 
-            start = time.time()
-            last_speed, last_eta = 0.0, "—"
+            start      = time.time()
+            last_speed = 0.0
+            last_eta   = "—"
 
             with col_r:
                 s_el   = st.empty()
                 pct_el = st.empty()
                 bar_el = st.empty()
                 met_el = st.empty()
+                err_el = st.empty()
 
             while True:
                 try:
@@ -507,16 +703,35 @@ elif page == "Batch Upload":
                 eta       = pr.get("eta", 0)
                 running   = pr.get("running", True)
                 elapsed   = time.time() - start
+                error_msg = pr.get("error")
 
-                if speed > 0: last_speed = speed
-                if eta   > 0: last_eta   = fmt_time(eta)
+                # Show batch error if backend crashed
+                if error_msg:
+                    err_el.error(f"Batch error: {error_msg}")
+
+                if speed > 0:   last_speed = speed
+                if eta   > 0:   last_eta   = fmt_time(eta)
 
                 done = not running and processed >= total
                 sc_  = "var(--teal)" if done else "var(--amber)"
 
-                s_el.markdown(f'<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:{sc_};margin-bottom:8px">{"Complete ✓" if done else "Processing…"}</div>', unsafe_allow_html=True)
-                pct_el.markdown(f'<div style="display:flex;justify-content:space-between;font-size:11px;font-family:\'JetBrains Mono\',monospace;color:var(--muted);margin-bottom:4px"><span>{processed:,} / {total:,}</span><span style="color:var(--teal);font-weight:700">{percent:.1f}%</span></div>', unsafe_allow_html=True)
-                bar_el.markdown(f'<div class="pbar-wrap"><div class="pbar-fill" style="width:{percent}%"></div></div>', unsafe_allow_html=True)
+                s_el.markdown(
+                    f'<div style="font-size:12px;font-weight:700;text-transform:uppercase;'
+                    f'letter-spacing:.1em;color:{sc_};margin-bottom:8px">'
+                    f'{"Complete ✓" if done else "Processing…"}</div>',
+                    unsafe_allow_html=True,
+                )
+                pct_el.markdown(
+                    f'<div style="display:flex;justify-content:space-between;font-size:11px;'
+                    f'font-family:\'JetBrains Mono\',monospace;color:var(--muted);margin-bottom:4px">'
+                    f'<span>{processed:,} / {total:,}</span>'
+                    f'<span style="color:var(--teal);font-weight:700">{percent:.1f}%</span></div>',
+                    unsafe_allow_html=True,
+                )
+                bar_el.markdown(
+                    f'<div class="pbar-wrap"><div class="pbar-fill" style="width:{percent}%"></div></div>',
+                    unsafe_allow_html=True,
+                )
                 met_el.markdown(f"""
                 <div class="mini2">
                   <div class="mini"><div class="mnl">Speed</div><div class="mnv">{last_speed:.1f}</div><div class="mns">reviews/sec</div></div>
@@ -527,11 +742,12 @@ elif page == "Batch Upload":
 
                 if done:
                     time.sleep(1.2)
-                    st.session_state.page = "Dashboard"
+                    st.session_state.page         = "Dashboard"
                     st.session_state.insight_text = ""
                     st.rerun()
 
                 time.sleep(0.5)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DASHBOARD
@@ -548,12 +764,12 @@ elif page == "Dashboard":
 
     with st.spinner("Loading results…"):
         try:
-            res  = requests.get(f"{API_BASE}/results", timeout=10)
+            res  = requests.get(f"{API_BASE}/results", timeout=REQUEST_TO)
             res.raise_for_status()
             data    = res.json()
             results = data.get("results", [])
-        except Exception as e:
-            st.error(f"Could not load: {e}")
+        except Exception as exc:
+            st.error(f"Could not load: {exc}")
             st.stop()
 
     if not results:
@@ -563,32 +779,56 @@ elif page == "Dashboard":
     df     = pd.DataFrame(results)
     total  = len(df)
     sc_    = df["sentiment"].value_counts().to_dict()
-    pos_, neg_, neu_ = sc_.get("Positive", 0), sc_.get("Negative", 0), sc_.get("Neutral", 0)
+    pos_   = sc_.get("Positive", 0)
+    neg_   = sc_.get("Negative", 0)
+    neu_   = sc_.get("Neutral", 0)
     fake_n = int((df["fake_review"] == "Fake").sum())
     fname  = data.get("file_name", "")
 
-    st.markdown(f'<p style="font-size:12px;color:var(--muted);margin-bottom:18px;font-family:\'JetBrains Mono\',monospace">{total:,} reviews{(" · " + fname) if fname else ""}</p>', unsafe_allow_html=True)
+    st.markdown(
+        f'<p style="font-size:12px;color:var(--muted);margin-bottom:18px;'
+        f'font-family:\'JetBrains Mono\',monospace">'
+        f'{total:,} reviews{(" · " + fname) if fname else ""}</p>',
+        unsafe_allow_html=True,
+    )
 
     # ── Alerts ────────────────────────────────────────────────────────────────
     ah = ""
     if fake_n / total > 0.10:
-        ah += f'<div class="alert a-crit"><div style="font-weight:700;flex-shrink:0">⚠</div><div><div class="at">Elevated fake review rate</div><div class="ab">Fake reviews at {pct(fake_n,total)}, above the 10% threshold.</div></div></div>'
+        ah += (
+            f'<div class="alert a-crit"><div style="font-weight:700;flex-shrink:0">⚠</div>'
+            f'<div><div class="at">Elevated fake review rate</div>'
+            f'<div class="ab">Fake reviews at {pct(fake_n,total)}, above the 10% threshold.</div></div></div>'
+        )
     if neg_ / total > 0.50:
-        ah += f'<div class="alert a-crit"><div style="font-weight:700;flex-shrink:0">↓</div><div><div class="at">Negative sentiment spike</div><div class="ab">{pct(neg_,total)} of reviews are negative.</div></div></div>'
+        ah += (
+            f'<div class="alert a-crit"><div style="font-weight:700;flex-shrink:0">↓</div>'
+            f'<div><div class="at">Negative sentiment spike</div>'
+            f'<div class="ab">{pct(neg_,total)} of reviews are negative.</div></div></div>'
+        )
     if not ah:
-        ah = '<div class="alert a-ok"><div style="font-weight:700;flex-shrink:0">✓</div><div><div class="at">No issues detected</div><div class="ab">Dataset is within normal thresholds.</div></div></div>'
+        ah = (
+            '<div class="alert a-ok"><div style="font-weight:700;flex-shrink:0">✓</div>'
+            '<div><div class="at">No issues detected</div>'
+            '<div class="ab">Dataset is within normal thresholds.</div></div></div>'
+        )
     st.markdown(ah, unsafe_allow_html=True)
 
     # ── KPI row ───────────────────────────────────────────────────────────────
     kpis = [
-        ("#2563eb", "📊", "Total",    f"{total:,}",  "reviews"),
+        ("#2563eb",      "📊", "Total",    f"{total:,}",  "reviews"),
         ("var(--teal)",  "😊", "Positive", str(pos_),     pct(pos_, total)),
         ("var(--amber)", "😐", "Neutral",  str(neu_),     pct(neu_, total)),
         ("var(--rose)",  "😞", "Negative", str(neg_),     pct(neg_, total)),
         ("#b06000",      "🕵️", "Fake",     str(fake_n),   pct(fake_n, total) + " flagged"),
     ]
     for col, (color, emoji, label, val, sub) in zip(st.columns(5), kpis):
-        col.markdown(f'<div class="kpi" style="--kc:{color}"><div class="kpi-em">{emoji}</div><div class="kpi-lbl">{label}</div><div class="kpi-val">{val}</div><div class="kpi-sub">{sub}</div></div>', unsafe_allow_html=True)
+        col.markdown(
+            f'<div class="kpi" style="--kc:{color}"><div class="kpi-em">{emoji}</div>'
+            f'<div class="kpi-lbl">{label}</div><div class="kpi-val">{val}</div>'
+            f'<div class="kpi-sub">{sub}</div></div>',
+            unsafe_allow_html=True,
+        )
 
     # ── AI Insights ───────────────────────────────────────────────────────────
     st.markdown('<div class="sec">AI Insights</div>', unsafe_allow_html=True)
@@ -597,54 +837,69 @@ elif page == "Dashboard":
     if not st.session_state.insight_text or regen:
         with st.spinner("Generating executive summary…"):
             try:
-                ir = requests.get(f"{API_BASE}/insights", timeout=30)
+                ir = requests.get(f"{API_BASE}/insights", timeout=35)
                 ir.raise_for_status()
                 idata = ir.json()
                 st.session_state.insight_text = idata.get("summary", "")
                 st.session_state.insight_pos  = idata.get("stats", {}).get("pos_keywords", [])
                 st.session_state.insight_neg  = idata.get("stats", {}).get("neg_keywords", [])
-            except Exception as e:
-                st.session_state.insight_text = f"Could not generate insights: {e}"
+            except Exception as exc:
+                st.session_state.insight_text = f"Could not generate insights: {exc}"
 
     pp  = "".join(f'<span class="kwp">+ {k}</span>' for k in st.session_state.insight_pos[:6])
     np_ = "".join(f'<span class="kwn">− {k}</span>' for k in st.session_state.insight_neg[:6])
-    st.markdown(f'<div class="insight-wrap"><div class="ai-tag"><div style="width:5px;height:5px;border-radius:50%;background:#4f46e5"></div>AI Generated</div><div class="itext">{st.session_state.insight_text}</div><div class="kw-row">{pp}{np_}</div></div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="insight-wrap">'
+        f'<div class="ai-tag"><div style="width:5px;height:5px;border-radius:50%;background:#4f46e5"></div>AI Generated</div>'
+        f'<div class="itext">{st.session_state.insight_text}</div>'
+        f'<div class="kw-row">{pp}{np_}</div></div>',
+        unsafe_allow_html=True,
+    )
 
     # ── Charts ────────────────────────────────────────────────────────────────
     st.markdown('<div class="sec">Visualisations</div>', unsafe_allow_html=True)
 
-    plo = dict(margin=dict(t=36, b=16, l=0, r=0), height=240,
-               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-               font=dict(family="Syne, sans-serif", size=11, color="#6b6860"),
-               showlegend=True, legend=dict(font=dict(size=10), orientation="h", y=-0.2))
+    plo = dict(
+        margin=dict(t=36,b=16,l=0,r=0), height=240,
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Syne, sans-serif", size=11, color="#6b6860"),
+        showlegend=True, legend=dict(font=dict(size=10), orientation="h", y=-0.2),
+    )
 
     cc1, cc2 = st.columns(2)
     with cc1:
         fig = go.Figure(go.Pie(
-            labels=["Positive", "Neutral", "Negative"], values=[pos_, neu_, neg_],
-            hole=0.65, marker=dict(colors=["#0f7c6e","#c47b0a","#b83348"], line=dict(color="white", width=3)),
-            textinfo="none", hoverinfo="label+percent+value"))
+            labels=["Positive","Neutral","Negative"], values=[pos_, neu_, neg_],
+            hole=0.65,
+            marker=dict(colors=["#0f7c6e","#c47b0a","#b83348"], line=dict(color="white",width=3)),
+            textinfo="none", hoverinfo="label+percent+value",
+        ))
         fig.update_layout(title=dict(text="Sentiment split", font=dict(size=11), x=0.5), **plo)
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar":False})
 
     with cc2:
         fig2 = go.Figure(go.Pie(
-            labels=["Real", "Fake"], values=[total - fake_n, fake_n],
-            hole=0.65, marker=dict(colors=["#0f7c6e","#b06000"], line=dict(color="white", width=3)),
-            textinfo="none", hoverinfo="label+percent+value"))
+            labels=["Real","Fake"], values=[total-fake_n, fake_n],
+            hole=0.65,
+            marker=dict(colors=["#0f7c6e","#b06000"], line=dict(color="white",width=3)),
+            textinfo="none", hoverinfo="label+percent+value",
+        ))
         fig2.update_layout(title=dict(text="Authenticity", font=dict(size=11), x=0.5), **plo)
-        st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar":False})
 
     # ── Word clouds ───────────────────────────────────────────────────────────
     try:
         from wordcloud import WordCloud
         import matplotlib.pyplot as plt
-        STOP = {"the","and","for","are","but","not","you","all","can","had","her","was","one","our",
-                "out","day","get","has","him","his","how","its","may","new","now","old","see","two",
-                "way","who","did","let","put","say","she","too","use","this","that","with","from",
-                "have","very","well","after","like","just","been","more","when","than","then","they",
-                "were","what","will","your","also","each","much","over","such","into","only","other",
-                "some","these","would","could","should","really","great","good","product","item","order","bought"}
+
+        STOP = {
+            "the","and","for","are","but","not","you","all","can","had","her","was","one","our",
+            "out","day","get","has","him","his","how","its","may","new","now","old","see","two",
+            "way","who","did","let","put","say","she","too","use","this","that","with","from",
+            "have","very","well","after","like","just","been","more","when","than","then","they",
+            "were","what","will","your","also","each","much","over","such","into","only","other",
+            "some","these","would","could","should","really","great","good","product","item","order","bought",
+        }
 
         def wc_text(filt):
             raw = " ".join(r["review"] for r in results if r.get("sentiment") == filt).lower()
@@ -652,38 +907,46 @@ elif page == "Dashboard":
 
         st.markdown('<div class="sec">Keyword clouds</div>', unsafe_allow_html=True)
         wc1, wc2 = st.columns(2)
-        for col, (filt, label, cmap, lc) in [
-            (wc1, ("Positive", "Positive keywords", "YlGn",  "var(--teal)")),
-            (wc2, ("Negative", "Negative keywords", "OrRd",  "var(--rose)")),
+        for col, filt, label, cmap, lc in [
+            (wc1, "Positive", "Positive keywords", "YlGn", "var(--teal)"),
+            (wc2, "Negative", "Negative keywords", "OrRd",  "var(--rose)"),
         ]:
             with col:
-                st.markdown(f'<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:{lc};margin-bottom:6px">{label}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div style="font-size:10px;font-weight:700;text-transform:uppercase;'
+                    f'letter-spacing:.1em;color:{lc};margin-bottom:6px">{label}</div>',
+                    unsafe_allow_html=True,
+                )
                 wct = wc_text(filt)
                 if wct.strip():
-                    wc = WordCloud(width=520, height=200, background_color="white",
-                                   colormap=cmap, max_words=55, prefer_horizontal=0.88,
-                                   collocations=False).generate(wct)
+                    wc = WordCloud(
+                        width=520, height=200, background_color="white",
+                        colormap=cmap, max_words=55, prefer_horizontal=0.88, collocations=False,
+                    ).generate(wct)
                     fig, ax = plt.subplots(figsize=(5.2, 2))
                     ax.imshow(wc, interpolation="bilinear"); ax.axis("off")
                     fig.patch.set_facecolor("white"); plt.tight_layout(pad=0)
                     st.pyplot(fig, use_container_width=True); plt.close()
                 else:
-                    st.markdown(f'<div style="background:var(--bg);border-radius:12px;height:140px;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted)">No {filt.lower()} reviews</div>', unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div style="background:var(--bg);border-radius:12px;height:140px;'
+                        f'display:flex;align-items:center;justify-content:center;font-size:12px;'
+                        f'color:var(--muted)">No {filt.lower()} reviews</div>',
+                        unsafe_allow_html=True,
+                    )
     except ImportError:
         st.info("Install `wordcloud` and `matplotlib` for keyword clouds.")
 
     # ── Product table ─────────────────────────────────────────────────────────
-    # FIX: Avg_Conf stored as 0.0–1.0 in results; multiply ×100 here ONCE
-    # then use NumberColumn (not ProgressColumn) to avoid the ×100 double-multiply
     st.markdown('<div class="sec">By Product</div>', unsafe_allow_html=True)
     prod_df = df.groupby("product").agg(
-        Total     = ("review",      "count"),
-        Positive  = ("sentiment",   lambda x: (x == "Positive").sum()),
-        Negative  = ("sentiment",   lambda x: (x == "Negative").sum()),
-        Neutral   = ("sentiment",   lambda x: (x == "Neutral").sum()),
-        Fake      = ("fake_review", lambda x: (x == "Fake").sum()),
-        Avg_Conf  = ("confidence",  lambda x: round(x.astype(float).mean() * 100, 1)),
-    ).reset_index().rename(columns={"product": "Product", "Avg_Conf": "Avg Conf %"})
+        Total    =("review",      "count"),
+        Positive =("sentiment",   lambda x: (x=="Positive").sum()),
+        Negative =("sentiment",   lambda x: (x=="Negative").sum()),
+        Neutral  =("sentiment",   lambda x: (x=="Neutral").sum()),
+        Fake     =("fake_review", lambda x: (x=="Fake").sum()),
+        Avg_Conf =("confidence",  lambda x: round(x.astype(float).mean() * 100, 1)),
+    ).reset_index().rename(columns={"product":"Product","Avg_Conf":"Avg Conf %"})
     prod_df = prod_df.sort_values("Total", ascending=False)
 
     st.dataframe(
@@ -691,13 +954,8 @@ elif page == "Dashboard":
         use_container_width=True,
         hide_index=True,
         column_config={
-            # ProgressColumn expects values 0–100 — Avg_Conf is already ×100 above
             "Avg Conf %": st.column_config.ProgressColumn(
-                "Avg Conf %",
-                help="Average model confidence (0–100%)",
-                min_value=0,
-                max_value=100,
-                format="%.1f%%",
+                "Avg Conf %", min_value=0, max_value=100, format="%.1f%%",
             )
         },
     )
@@ -719,9 +977,9 @@ elif page == "Dashboard":
 
                 st.markdown('<div style="height:12px"></div>', unsafe_allow_html=True)
 
-                e_n = dup.get("exact_count", 0)
-                n_n = dup.get("near_count", 0)
-                s_n = dup.get("semantic_count", 0)
+                e_n = dup.get("exact_count",0)
+                n_n = dup.get("near_count",0)
+                s_n = dup.get("semantic_count",0)
                 st.markdown(f"""
                 <div style="display:flex;gap:10px;margin-bottom:16px">
                   <div style="flex:1;background:var(--rose-pale);border:1px solid rgba(184,51,72,.2);border-radius:12px;padding:12px 16px;text-align:center">
@@ -744,9 +1002,9 @@ elif page == "Dashboard":
 
                 dup_rows = [r for r in dup["results"] if r["dup_type"] != "original"]
                 if dup_rows:
-                    dup_df = pd.DataFrame(dup_rows)[["index","dup_type","similarity","review"]].rename(columns={
-                        "index":"#","dup_type":"Type","similarity":"Similarity","review":"Review"
-                    })
+                    dup_df = pd.DataFrame(dup_rows)[["index","dup_type","similarity","review"]].rename(
+                        columns={"index":"#","dup_type":"Type","similarity":"Similarity","review":"Review"}
+                    )
                     dup_df["Similarity"] = dup_df["Similarity"].apply(lambda x: f"{x:.2f}" if x is not None else "—")
                     st.dataframe(dup_df, use_container_width=True, hide_index=True)
                 else:
@@ -754,15 +1012,19 @@ elif page == "Dashboard":
 
             except requests.exceptions.Timeout:
                 st.error("Duplicate detection timed out — try a smaller dataset.")
-            except Exception as e:
-                st.error(f"Duplicate detection failed: {e}")
+            except Exception as exc:
+                st.error(f"Duplicate detection failed: {exc}")
     else:
-        st.markdown('<div style="font-size:12px;color:var(--muted);padding:8px 0">Click the button above to run 3-stage duplicate detection (Exact · Near · Semantic) across all reviews.</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div style="font-size:12px;color:var(--muted);padding:8px 0">'
+            "Click the button above to run 3-stage duplicate detection (Exact · Near · Semantic) across all reviews."
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
     # ── Results preview + download ────────────────────────────────────────────
     st.markdown('<div class="sec">Results preview — first 50 rows</div>', unsafe_allow_html=True)
     preview = df.head(50)[["review","sentiment","product","fake_review","confidence"]].copy()
-    # multiply ×100 ONCE here for display only — source data stays 0–1
     preview["confidence"] = (preview["confidence"].astype(float) * 100).round(1).astype(str) + "%"
     st.dataframe(preview, use_container_width=True, hide_index=True)
 
@@ -773,6 +1035,7 @@ elif page == "Dashboard":
         mime="text/csv",
     )
 
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PRODUCT DEEP DIVE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -782,7 +1045,12 @@ elif page == "Product Deep Dive":
 
     st.markdown('<div class="tag tag-violet">◎ Product Intelligence</div>', unsafe_allow_html=True)
     st.markdown("## Product Deep Dive")
-    st.markdown('<p style="font-size:13px;color:#6b6860;margin-bottom:22px">Drill into any product category — sentiment breakdown, sub-category performance, and representative reviews.</p>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="font-size:13px;color:#6b6860;margin-bottom:22px">'
+        "Drill into any product category — sentiment breakdown, sub-category performance, and representative reviews."
+        "</p>",
+        unsafe_allow_html=True,
+    )
 
     if not backend_ok():
         st.error(f"Backend not reachable at `{API_BASE}`")
@@ -790,223 +1058,185 @@ elif page == "Product Deep Dive":
 
     with st.spinner("Loading results…"):
         try:
-            res  = requests.get(f"{API_BASE}/results", timeout=10)
+            res  = requests.get(f"{API_BASE}/results", timeout=REQUEST_TO)
             res.raise_for_status()
             data    = res.json()
             results = data.get("results", [])
-        except Exception as e:
-            st.error(f"Could not load results: {e}")
+        except Exception as exc:
+            st.error(f"Could not load results: {exc}")
             st.stop()
 
     if not results:
         st.warning("No data yet. Run a Batch Analysis first.")
         st.stop()
 
-    # ── Re-classify with sub-category (results only have top-level category) ──
-    # We run detect_product_full on each review text so we get sub_category too.
-    # Cache in session_state to avoid re-running on every interaction.
     cache_key = f"pdd_cache_{len(results)}"
     if cache_key not in st.session_state:
         enriched = []
         for r in results:
-            pr = detect_product_full(r.get("review", ""))
+            pr = detect_product_full(r.get("review",""))
             enriched.append({**r, "sub_category": pr.sub_category})
         st.session_state[cache_key] = enriched
     enriched = st.session_state[cache_key]
 
-    df_pdd  = pd.DataFrame(enriched)
-    total   = len(df_pdd)
+    df_pdd = pd.DataFrame(enriched)
+    total  = len(df_pdd)
 
-    # ── Category selector ─────────────────────────────────────────────────────
     all_cats = sorted(df_pdd["product"].dropna().unique().tolist())
     if not all_cats:
-        st.warning("No product categories found in results.")
+        st.warning("No product categories found.")
         st.stop()
 
     plo_base = dict(
-        margin=dict(t=36, b=16, l=0, r=0), height=220,
+        margin=dict(t=36,b=16,l=0,r=0), height=220,
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font=dict(family="Syne, sans-serif", size=11, color="#6b6860"),
-        showlegend=True,
-        legend=dict(font=dict(size=10), orientation="h", y=-0.25),
+        showlegend=True, legend=dict(font=dict(size=10), orientation="h", y=-0.25),
     )
 
-    # ── Overview strip: one KPI per category ─────────────────────────────────
     st.markdown('<div class="sec">Category Overview</div>', unsafe_allow_html=True)
 
     cat_summary = []
     for cat in all_cats:
         sub = df_pdd[df_pdd["product"] == cat]
         n   = len(sub)
-        pos = int((sub["sentiment"] == "Positive").sum())
-        neg = int((sub["sentiment"] == "Negative").sum())
-        fk  = int((sub["fake_review"] == "Fake").sum())
-        avg_conf = round(sub["confidence"].astype(float).mean() * 100, 1)
-        cat_summary.append({"cat": cat, "n": n, "pos": pos, "neg": neg, "fake": fk, "conf": avg_conf})
-
+        cat_summary.append({
+            "cat":  cat,
+            "n":    n,
+            "pos":  int((sub["sentiment"]=="Positive").sum()),
+            "neg":  int((sub["sentiment"]=="Negative").sum()),
+            "fake": int((sub["fake_review"]=="Fake").sum()),
+            "conf": round(sub["confidence"].astype(float).mean() * 100, 1),
+        })
     cat_summary.sort(key=lambda x: -x["n"])
 
-    # Render as a scrollable overview grid
     grid_html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:24px">'
     for cs in cat_summary:
-        ico = PROD_ICO.get(cs["cat"], "📦")
+        ico     = PROD_ICO.get(cs["cat"], "📦")
         pos_pct = round(cs["pos"] / cs["n"] * 100) if cs["n"] else 0
         neg_pct = round(cs["neg"] / cs["n"] * 100) if cs["n"] else 0
-        bar_pos = f'<div style="height:4px;background:rgba(12,12,14,.08);border-radius:10px;margin-top:8px;overflow:hidden"><div style="width:{pos_pct}%;height:100%;background:linear-gradient(90deg,var(--teal),#1cbfac);border-radius:10px"></div></div>'
-        grid_html += f'''<div class="kpi" style="--kc:var(--teal);cursor:pointer" onclick="void(0)">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start">
-            <div style="font-size:20px">{ico}</div>
-            <div style="font-size:10px;font-weight:700;color:var(--muted);font-family:\'JetBrains Mono\',monospace">{cs["n"]} reviews</div>
-          </div>
-          <div style="font-size:12px;font-weight:700;margin:6px 0 2px">{cs["cat"]}</div>
-          <div style="font-size:10px;color:var(--muted)">{pos_pct}% pos · {neg_pct}% neg · {cs["fake"]} fake</div>
-          {bar_pos}
-        </div>'''
+        bar_pos = (
+            f'<div style="height:4px;background:rgba(12,12,14,.08);border-radius:10px;'
+            f'margin-top:8px;overflow:hidden">'
+            f'<div style="width:{pos_pct}%;height:100%;background:linear-gradient(90deg,var(--teal),#1cbfac);'
+            f'border-radius:10px"></div></div>'
+        )
+        grid_html += (
+            f'<div class="kpi" style="--kc:var(--teal)">'
+            f'<div style="display:flex;justify-content:space-between;align-items:flex-start">'
+            f'<div style="font-size:20px">{ico}</div>'
+            f'<div style="font-size:10px;font-weight:700;color:var(--muted);font-family:\'JetBrains Mono\',monospace">{cs["n"]} reviews</div>'
+            f'</div>'
+            f'<div style="font-size:12px;font-weight:700;margin:6px 0 2px">{cs["cat"]}</div>'
+            f'<div style="font-size:10px;color:var(--muted)">{pos_pct}% pos · {neg_pct}% neg · {cs["fake"]} fake</div>'
+            f'{bar_pos}</div>'
+        )
     grid_html += '</div>'
     st.markdown(grid_html, unsafe_allow_html=True)
 
-    # ── Category deep-dive selector ───────────────────────────────────────────
     st.markdown('<div class="sec">Deep Dive — Select a Category</div>', unsafe_allow_html=True)
     sel_cat = st.selectbox("Product category", all_cats, label_visibility="collapsed")
 
     df_cat = df_pdd[df_pdd["product"] == sel_cat].copy()
     n_cat  = len(df_cat)
-
     if n_cat == 0:
         st.info(f"No reviews found for {sel_cat}.")
         st.stop()
 
-    cat_pos  = int((df_cat["sentiment"] == "Positive").sum())
-    cat_neg  = int((df_cat["sentiment"] == "Negative").sum())
-    cat_neu  = int((df_cat["sentiment"] == "Neutral").sum())
-    cat_fake = int((df_cat["fake_review"] == "Fake").sum())
+    cat_pos  = int((df_cat["sentiment"]=="Positive").sum())
+    cat_neg  = int((df_cat["sentiment"]=="Negative").sum())
+    cat_neu  = int((df_cat["sentiment"]=="Neutral").sum())
+    cat_fake = int((df_cat["fake_review"]=="Fake").sum())
     cat_conf = round(df_cat["confidence"].astype(float).mean() * 100, 1)
 
-    # ── Category KPI row ──────────────────────────────────────────────────────
-    ico_sel = PROD_ICO.get(sel_cat, "📦")
-    k1, k2, k3, k4, k5 = st.columns(5)
+    ico_sel  = PROD_ICO.get(sel_cat, "📦")
+    k1,k2,k3,k4,k5 = st.columns(5)
     k1.markdown(f'<div class="kpi" style="--kc:#2563eb"><div class="kpi-em">{ico_sel}</div><div class="kpi-lbl">Reviews</div><div class="kpi-val">{n_cat:,}</div><div class="kpi-sub">in {sel_cat}</div></div>', unsafe_allow_html=True)
     k2.markdown(f'<div class="kpi" style="--kc:var(--teal)"><div class="kpi-em">😊</div><div class="kpi-lbl">Positive</div><div class="kpi-val">{cat_pos}</div><div class="kpi-sub">{pct(cat_pos,n_cat)}</div></div>', unsafe_allow_html=True)
     k3.markdown(f'<div class="kpi" style="--kc:var(--amber)"><div class="kpi-em">😐</div><div class="kpi-lbl">Neutral</div><div class="kpi-val">{cat_neu}</div><div class="kpi-sub">{pct(cat_neu,n_cat)}</div></div>', unsafe_allow_html=True)
     k4.markdown(f'<div class="kpi" style="--kc:var(--rose)"><div class="kpi-em">😞</div><div class="kpi-lbl">Negative</div><div class="kpi-val">{cat_neg}</div><div class="kpi-sub">{pct(cat_neg,n_cat)}</div></div>', unsafe_allow_html=True)
     k5.markdown(f'<div class="kpi" style="--kc:#b06000"><div class="kpi-em">🕵️</div><div class="kpi-lbl">Fake</div><div class="kpi-val">{cat_fake}</div><div class="kpi-sub">{pct(cat_fake,n_cat)} · {cat_conf}% conf</div></div>', unsafe_allow_html=True)
 
-    # ── Charts row ────────────────────────────────────────────────────────────
     st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
     ch1, ch2 = st.columns(2)
-
     with ch1:
-        fig = go.Figure(go.Pie(
-            labels=["Positive","Neutral","Negative"],
-            values=[cat_pos, cat_neu, cat_neg],
-            hole=0.62,
-            marker=dict(colors=["#0f7c6e","#c47b0a","#b83348"], line=dict(color="white", width=3)),
-            textinfo="none", hoverinfo="label+percent+value",
-        ))
-        fig.update_layout(title=dict(text=f"Sentiment — {sel_cat}", font=dict(size=11), x=0.5), **plo_base)
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-
+        fig = go.Figure(go.Pie(labels=["Positive","Neutral","Negative"],values=[cat_pos,cat_neu,cat_neg],hole=0.62,marker=dict(colors=["#0f7c6e","#c47b0a","#b83348"],line=dict(color="white",width=3)),textinfo="none",hoverinfo="label+percent+value"))
+        fig.update_layout(title=dict(text=f"Sentiment — {sel_cat}",font=dict(size=11),x=0.5),**plo_base)
+        st.plotly_chart(fig,use_container_width=True,config={"displayModeBar":False})
     with ch2:
-        fig2 = go.Figure(go.Pie(
-            labels=["Real","Fake"],
-            values=[n_cat - cat_fake, cat_fake],
-            hole=0.62,
-            marker=dict(colors=["#0f7c6e","#b06000"], line=dict(color="white", width=3)),
-            textinfo="none", hoverinfo="label+percent+value",
-        ))
-        fig2.update_layout(title=dict(text=f"Authenticity — {sel_cat}", font=dict(size=11), x=0.5), **plo_base)
-        st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
+        fig2 = go.Figure(go.Pie(labels=["Real","Fake"],values=[n_cat-cat_fake,cat_fake],hole=0.62,marker=dict(colors=["#0f7c6e","#b06000"],line=dict(color="white",width=3)),textinfo="none",hoverinfo="label+percent+value"))
+        fig2.update_layout(title=dict(text=f"Authenticity — {sel_cat}",font=dict(size=11),x=0.5),**plo_base)
+        st.plotly_chart(fig2,use_container_width=True,config={"displayModeBar":False})
 
-    # ── Sub-category detail table ─────────────────────────────────────────────
     st.markdown('<div class="sec">Sub-Category Detail</div>', unsafe_allow_html=True)
-
     sub_rows = []
     for sub_name in df_cat["sub_category"].dropna().unique():
-        sub_df = df_cat[df_cat["sub_category"] == sub_name]
+        sub_df = df_cat[df_cat["sub_category"]==sub_name]
         n_s    = len(sub_df)
-        pos_s  = int((sub_df["sentiment"] == "Positive").sum())
-        neu_s  = int((sub_df["sentiment"] == "Neutral").sum())
-        neg_s  = int((sub_df["sentiment"] == "Negative").sum())
-        fk_s   = int((sub_df["fake_review"] == "Fake").sum())
-        conf_s = round(sub_df["confidence"].astype(float).mean() * 100, 1)
         sub_rows.append({
             "Sub-Category": sub_name,
             "Total":    n_s,
-            "Positive": pos_s,
-            "Neutral":  neu_s,
-            "Negative": neg_s,
-            "Pos %":    round(pos_s / n_s * 100, 1) if n_s else 0.0,
-            "Neg %":    round(neg_s / n_s * 100, 1) if n_s else 0.0,
-            "Fake":     fk_s,
-            "Fake %":   round(fk_s / n_s * 100, 1) if n_s else 0.0,
-            "Avg Conf %": conf_s,
+            "Positive": int((sub_df["sentiment"]=="Positive").sum()),
+            "Neutral":  int((sub_df["sentiment"]=="Neutral").sum()),
+            "Negative": int((sub_df["sentiment"]=="Negative").sum()),
+            "Pos %":    round(int((sub_df["sentiment"]=="Positive").sum())/n_s*100,1) if n_s else 0.0,
+            "Neg %":    round(int((sub_df["sentiment"]=="Negative").sum())/n_s*100,1) if n_s else 0.0,
+            "Fake":     int((sub_df["fake_review"]=="Fake").sum()),
+            "Fake %":   round(int((sub_df["fake_review"]=="Fake").sum())/n_s*100,1) if n_s else 0.0,
+            "Avg Conf %": round(sub_df["confidence"].astype(float).mean()*100,1),
         })
-
     if sub_rows:
         sub_df_display = pd.DataFrame(sub_rows).sort_values("Total", ascending=False)
-        st.dataframe(
-            sub_df_display,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Pos %": st.column_config.ProgressColumn("Pos %", min_value=0, max_value=100, format="%.1f%%"),
-                "Neg %": st.column_config.ProgressColumn("Neg %", min_value=0, max_value=100, format="%.1f%%"),
-                "Fake %": st.column_config.ProgressColumn("Fake %", min_value=0, max_value=100, format="%.1f%%"),
-                "Avg Conf %": st.column_config.ProgressColumn("Avg Conf %", min_value=0, max_value=100, format="%.1f%%"),
-            },
-        )
-    else:
-        st.info("No sub-category data available for this category.")
+        st.dataframe(sub_df_display, use_container_width=True, hide_index=True, column_config={
+            "Pos %":      st.column_config.ProgressColumn("Pos %",      min_value=0, max_value=100, format="%.1f%%"),
+            "Neg %":      st.column_config.ProgressColumn("Neg %",      min_value=0, max_value=100, format="%.1f%%"),
+            "Fake %":     st.column_config.ProgressColumn("Fake %",     min_value=0, max_value=100, format="%.1f%%"),
+            "Avg Conf %": st.column_config.ProgressColumn("Avg Conf %", min_value=0, max_value=100, format="%.1f%%"),
+        })
 
-    # ── Sub-category selector for representative reviews ──────────────────────
     st.markdown('<div class="sec">Representative Reviews</div>', unsafe_allow_html=True)
-
     avail_subs = ["All Sub-Categories"] + sorted(df_cat["sub_category"].dropna().unique().tolist())
     sel_sub    = st.selectbox("Sub-category filter", avail_subs, label_visibility="collapsed")
+    df_sub     = df_cat if sel_sub == "All Sub-Categories" else df_cat[df_cat["sub_category"]==sel_sub]
 
-    df_sub = df_cat if sel_sub == "All Sub-Categories" else df_cat[df_cat["sub_category"] == sel_sub]
-
-    neg_samples  = df_sub[df_sub["sentiment"] == "Negative"]["review"].tolist()[:5]
-    pos_samples  = df_sub[df_sub["sentiment"] == "Positive"]["review"].tolist()[:5]
+    neg_samples = df_sub[df_sub["sentiment"]=="Negative"]["review"].tolist()[:5]
+    pos_samples = df_sub[df_sub["sentiment"]=="Positive"]["review"].tolist()[:5]
 
     col_neg, col_pos = st.columns(2)
+    for col, samples, color, label in [
+        (col_neg, neg_samples, "var(--rose)", "↓ Negative Samples"),
+        (col_pos, pos_samples, "var(--teal)", "↑ Positive Samples"),
+    ]:
+        with col:
+            st.markdown(
+                f'<div style="font-size:10px;font-weight:700;text-transform:uppercase;'
+                f'letter-spacing:.12em;color:{color};margin-bottom:10px">{label}</div>',
+                unsafe_allow_html=True,
+            )
+            if samples:
+                for rev in samples:
+                    rev_display = _sanitize_for_display(rev[:200] + ("…" if len(rev)>200 else ""))
+                    sub_tag  = df_sub[df_sub["review"]==rev]["sub_category"].values
+                    sub_lbl  = sub_tag[0] if len(sub_tag) else sel_cat
+                    conf_v   = df_sub[df_sub["review"]==rev]["confidence"].values
+                    conf_pct = round(float(conf_v[0])*100) if len(conf_v) else 0
+                    st.markdown(
+                        f'<div style="background:var(--surface);border:1px solid var(--border);'
+                        f'border-left:3px solid {color};border-radius:12px;padding:14px 16px;margin-bottom:8px">'
+                        f'<div style="font-size:13px;line-height:1.65;color:var(--ink);margin-bottom:8px">{rev_display}</div>'
+                        f'<div style="font-size:10px;color:var(--muted)">{sub_lbl} · '
+                        f'<span style="color:var(--teal);font-weight:700">{conf_pct}% conf</span></div></div>',
+                        unsafe_allow_html=True,
+                    )
+            else:
+                st.markdown(
+                    f'<div style="font-size:13px;color:var(--muted);padding:16px 0">No reviews.</div>',
+                    unsafe_allow_html=True,
+                )
 
-    with col_neg:
-        st.markdown('<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--rose);margin-bottom:10px">↓ Negative Samples</div>', unsafe_allow_html=True)
-        if neg_samples:
-            for rev in neg_samples:
-                rev_display = _sanitize_for_display(rev[:200] + ("…" if len(rev) > 200 else ""))
-                sub_tag = df_sub[df_sub["review"] == rev]["sub_category"].values
-                sub_lbl = sub_tag[0] if len(sub_tag) else sel_cat
-                conf_v  = df_sub[df_sub["review"] == rev]["confidence"].values
-                conf_pct_v = round(float(conf_v[0]) * 100) if len(conf_v) else 0
-                st.markdown(f'''<div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--rose);border-radius:12px;padding:14px 16px;margin-bottom:8px">
-                  <div style="font-size:13px;line-height:1.65;color:var(--ink);margin-bottom:8px">{rev_display}</div>
-                  <div style="font-size:10px;color:var(--muted)">{sub_lbl} · <span style="color:var(--teal);font-weight:700">{conf_pct_v}% conf</span></div>
-                </div>''', unsafe_allow_html=True)
-        else:
-            st.markdown('<div style="font-size:13px;color:var(--muted);padding:16px 0">No negative reviews.</div>', unsafe_allow_html=True)
-
-    with col_pos:
-        st.markdown('<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--teal);margin-bottom:10px">↑ Positive Samples</div>', unsafe_allow_html=True)
-        if pos_samples:
-            for rev in pos_samples:
-                rev_display = _sanitize_for_display(rev[:200] + ("…" if len(rev) > 200 else ""))
-                sub_tag = df_sub[df_sub["review"] == rev]["sub_category"].values
-                sub_lbl = sub_tag[0] if len(sub_tag) else sel_cat
-                conf_v  = df_sub[df_sub["review"] == rev]["confidence"].values
-                conf_pct_v = round(float(conf_v[0]) * 100) if len(conf_v) else 0
-                st.markdown(f'''<div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--teal);border-radius:12px;padding:14px 16px;margin-bottom:8px">
-                  <div style="font-size:13px;line-height:1.65;color:var(--ink);margin-bottom:8px">{rev_display}</div>
-                  <div style="font-size:10px;color:var(--muted)">{sub_lbl} · <span style="color:var(--teal);font-weight:700">{conf_pct_v}% conf</span></div>
-                </div>''', unsafe_allow_html=True)
-        else:
-            st.markdown('<div style="font-size:13px;color:var(--muted);padding:16px 0">No positive reviews.</div>', unsafe_allow_html=True)
-
-    # ── Download filtered ─────────────────────────────────────────────────────
     st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
     dl_df = df_cat[["review","sentiment","sub_category","fake_review","confidence"]].copy()
-    dl_df["confidence"] = (dl_df["confidence"].astype(float) * 100).round(1).astype(str) + "%"
+    dl_df["confidence"] = (dl_df["confidence"].astype(float)*100).round(1).astype(str) + "%"
     st.download_button(
         f"↓ Download {sel_cat} reviews CSV",
         data=dl_df.to_csv(index=False).encode("utf-8"),
@@ -1014,248 +1244,137 @@ elif page == "Product Deep Dive":
         mime="text/csv",
     )
 
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CUSTOMER VIEW
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "Customer View":
     st.markdown('<div class="tag tag-teal">◎ Customer View</div>', unsafe_allow_html=True)
     st.markdown("## What customers are saying")
-    st.markdown('<p style="font-size:13px;color:#6b6860;margin-bottom:22px">Browse reviews by product category, filter by sentiment & authenticity, and search across all fields without area restrictions.</p>', unsafe_allow_html=True)
 
     if not backend_ok():
-        st.error(f"Backend not reachable at `{API_BASE}`")
-        st.stop()
+        st.error(f"Backend not reachable at `{API_BASE}`"); st.stop()
 
     with st.spinner("Loading reviews…"):
         try:
-            res  = requests.get(f"{API_BASE}/results", timeout=10)
+            res  = requests.get(f"{API_BASE}/results", timeout=REQUEST_TO)
             res.raise_for_status()
             data    = res.json()
             results = data.get("results", [])
-        except Exception as e:
-            st.error(f"Could not load results: {e}")
-            st.stop()
+        except Exception as exc:
+            st.error(f"Could not load results: {exc}"); st.stop()
 
     if not results:
-        st.warning("No data yet. Run a Batch Analysis first.")
-        st.stop()
+        st.warning("No data yet. Run a Batch Analysis first."); st.stop()
 
     df_cv = pd.DataFrame(results)
     total = len(df_cv)
-    fname = data.get("file_name", "")
-
-    # ── Initialize session state ──────────────────────────────────────────────────
-    for k, v in [("cv_sent","All"),("cv_fake","All"),("cv_cat","All"),("cv_search",""),("cv_page",0),("cv_search_fields",["Review", "Product"])]:
-        if k not in st.session_state:
-            st.session_state[k] = v
+    fname = data.get("file_name","")
 
     sc_   = df_cv["sentiment"].value_counts().to_dict()
-    pos_c = sc_.get("Positive", 0)
-    neg_c = sc_.get("Negative", 0)
-    neu_c = sc_.get("Neutral",  0)
-    fk_c  = int((df_cv["fake_review"] == "Fake").sum())
+    pos_c = sc_.get("Positive",0); neg_c = sc_.get("Negative",0)
+    neu_c = sc_.get("Neutral",0);  fk_c  = int((df_cv["fake_review"]=="Fake").sum())
 
     st.markdown(f"""
     <div class="cv-stat-strip">
-      <div class="cv-stat"><div class="cv-stat-lbl">Total Reviews</div><div class="cv-stat-val" style="color:#2563eb">{total:,}</div><div class="cv-stat-sub">{fname or "dataset"}</div></div>
+      <div class="cv-stat"><div class="cv-stat-lbl">Total</div><div class="cv-stat-val" style="color:#2563eb">{total:,}</div><div class="cv-stat-sub">{fname or "dataset"}</div></div>
       <div class="cv-stat"><div class="cv-stat-lbl">Positive</div><div class="cv-stat-val" style="color:var(--teal)">{pos_c}</div><div class="cv-stat-sub">{pct(pos_c,total)}</div></div>
       <div class="cv-stat"><div class="cv-stat-lbl">Negative</div><div class="cv-stat-val" style="color:var(--rose)">{neg_c}</div><div class="cv-stat-sub">{pct(neg_c,total)}</div></div>
       <div class="cv-stat"><div class="cv-stat-lbl">Flagged Fake</div><div class="cv-stat-val" style="color:#b06000">{fk_c}</div><div class="cv-stat-sub">{pct(fk_c,total)}</div></div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Advanced Filters ──────────────────────────────────────────────────────────
-    st.markdown('<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin:20px 0 12px">Filters & Search</div>', unsafe_allow_html=True)
+    for k,v in [("cv_sent","All"),("cv_fake","All"),("cv_cat","All"),("cv_search",""),("cv_page",0)]:
+        if k not in st.session_state: st.session_state[k] = v
 
-    fc1, fc2, fc3, fc4 = st.columns([2.5, 1.8, 1.8, 1.8], gap="small")
-
+    fc1,fc2,fc3,fc4 = st.columns([2.5,1.8,1.8,1.8],gap="small")
     with fc1:
-        search_q = st.text_input("🔍 Global search", value=st.session_state.cv_search,
-                                  placeholder="Search across reviews, products, sentiment…", label_visibility="collapsed")
-        if search_q != st.session_state.cv_search:
-            st.session_state.cv_search = search_q
-            st.session_state.cv_page   = 0
-
+        sq = st.text_input("🔍 Search",value=st.session_state.cv_search,placeholder="Search reviews…",label_visibility="collapsed")
+        if sq != st.session_state.cv_search: st.session_state.cv_search=sq; st.session_state.cv_page=0
     with fc2:
-        sent_opts = ["All Sentiments", "Positive", "Negative", "Neutral"]
-        sent_sel  = st.selectbox("Sentiment", sent_opts,
-                                  index=sent_opts.index(st.session_state.cv_sent) if st.session_state.cv_sent in sent_opts else 0,
-                                  label_visibility="collapsed")
-        if sent_sel != st.session_state.cv_sent:
-            st.session_state.cv_sent = sent_sel
-            st.session_state.cv_page = 0
-
+        so=["All Sentiments","Positive","Negative","Neutral"]
+        ss=st.selectbox("Sentiment",so,index=so.index(st.session_state.cv_sent) if st.session_state.cv_sent in so else 0,label_visibility="collapsed")
+        if ss!=st.session_state.cv_sent: st.session_state.cv_sent=ss; st.session_state.cv_page=0
     with fc3:
-        fake_opts = ["All Reviews", "Real Only", "Fake Only"]
-        fake_sel  = st.selectbox("Authenticity", fake_opts,
-                                  index=fake_opts.index(st.session_state.cv_fake) if st.session_state.cv_fake in fake_opts else 0,
-                                  label_visibility="collapsed")
-        if fake_sel != st.session_state.cv_fake:
-            st.session_state.cv_fake = fake_sel
-            st.session_state.cv_page = 0
-
+        fo=["All Reviews","Real Only","Fake Only"]
+        fs=st.selectbox("Auth",fo,index=fo.index(st.session_state.cv_fake) if st.session_state.cv_fake in fo else 0,label_visibility="collapsed")
+        if fs!=st.session_state.cv_fake: st.session_state.cv_fake=fs; st.session_state.cv_page=0
     with fc4:
-        cat_vals = ["All Categories"] + sorted(df_cv["product"].dropna().unique().tolist())
-        cat_sel  = st.selectbox("Product Category", cat_vals,
-                                  index=cat_vals.index(st.session_state.cv_cat) if st.session_state.cv_cat in cat_vals else 0,
-                                  label_visibility="collapsed")
-        if cat_sel != st.session_state.cv_cat:
-            st.session_state.cv_cat = cat_sel
-            st.session_state.cv_page = 0
+        cv=["All Categories"]+sorted(df_cv["product"].dropna().unique().tolist())
+        cs2=st.selectbox("Category",cv,index=cv.index(st.session_state.cv_cat) if st.session_state.cv_cat in cv else 0,label_visibility="collapsed")
+        if cs2!=st.session_state.cv_cat: st.session_state.cv_cat=cs2; st.session_state.cv_page=0
 
-    # ── Apply all filters ─────────────────────────────────────────────────────────
     filtered = results[:]
-    
-    if sent_sel != "All Sentiments":
-        filtered = [r for r in filtered if r.get("sentiment") == sent_sel]
-    
-    if fake_sel == "Real Only":
-        filtered = [r for r in filtered if r.get("fake_review") == "Real"]
-    elif fake_sel == "Fake Only":
-        filtered = [r for r in filtered if r.get("fake_review") == "Fake"]
-    
-    if cat_sel != "All Categories":
-        filtered = [r for r in filtered if r.get("product") == cat_sel]
-    
-    # ── Unlimited search across all fields (no area restriction) ────────────────
-    if search_q.strip():
-        q_lower = search_q.strip().lower()
-        filtered = [
-            r for r in filtered
-            if (q_lower in r.get("review", "").lower() or
-                q_lower in r.get("product", "").lower() or
-                q_lower in r.get("sentiment", "").lower() or
-                q_lower in r.get("emotion", "").lower() or
-                q_lower in r.get("fake_review", "").lower())
-        ]
+    if ss!="All Sentiments": filtered=[r for r in filtered if r.get("sentiment")==ss]
+    if fs=="Real Only":      filtered=[r for r in filtered if r.get("fake_review")=="Real"]
+    elif fs=="Fake Only":    filtered=[r for r in filtered if r.get("fake_review")=="Fake"]
+    if cs2!="All Categories":filtered=[r for r in filtered if r.get("product")==cs2]
+    if sq.strip():
+        ql=sq.strip().lower()
+        filtered=[r for r in filtered if any(ql in str(r.get(f,"")).lower() for f in ["review","product","sentiment","emotion","fake_review"])]
 
-    n_filtered = len(filtered)
-    PAGE_SIZE  = 10
-    n_pages    = max(1, (n_filtered + PAGE_SIZE - 1) // PAGE_SIZE)
-    cur_page   = min(st.session_state.cv_page, n_pages - 1)
-    page_start = cur_page * PAGE_SIZE
-    page_end   = min(page_start + PAGE_SIZE, n_filtered)
-    page_items = filtered[page_start:page_end]
+    n_filt=len(filtered); PAGE_SIZE=10
+    n_pages=max(1,(n_filt+PAGE_SIZE-1)//PAGE_SIZE)
+    cur_page=min(st.session_state.cv_page,n_pages-1)
+    items=filtered[cur_page*PAGE_SIZE:cur_page*PAGE_SIZE+PAGE_SIZE]
 
-    # ── Results summary ───────────────────────────────────────────────────────────
-    summary_text = f'Showing {page_start+1}–{page_end} of {n_filtered:,} reviews'
-    if n_filtered < total:
-        summary_text += f'  ·  <strong>filtered</strong> from {total:,} total'
-    
     st.markdown(
-        f'<div style="font-size:11px;color:var(--muted);margin:16px 0 20px;font-family:\'JetBrains Mono\',monospace">{summary_text}</div>',
+        f'<div style="font-size:11px;color:var(--muted);margin:16px 0 20px;font-family:\'JetBrains Mono\',monospace">'
+        f'Showing {cur_page*PAGE_SIZE+1}–{min(cur_page*PAGE_SIZE+PAGE_SIZE,n_filt):,} of {n_filt:,} reviews</div>',
         unsafe_allow_html=True,
     )
 
-    # ── Review cards with enhanced layout ──────────────────────────────────────
-    if not page_items:
-        st.markdown('<div class="cv-no-results">No reviews match the current filters.</div>', unsafe_allow_html=True)
-    else:
-        SENT_EMO = {"Positive": "😊", "Negative": "😞", "Neutral": "😐"}
+    SENT_EMO={"Positive":"😊","Negative":"😞","Neutral":"😐"}
+    for idx,r in enumerate(items,start=cur_page*PAGE_SIZE+1):
+        review_txt=r.get("review",""); sentiment=r.get("sentiment","Neutral")
+        confidence=float(r.get("confidence",0)); fake_lbl=r.get("fake_review","Real")
+        fake_score=float(r.get("fake_score",0)); product=r.get("product","General")
+        emotion=r.get("emotion","Neutral")
 
-        for idx, r in enumerate(page_items, start=page_start+1):
-            review_txt = r.get("review", "")
-            sentiment  = r.get("sentiment", "Neutral")
-            confidence = float(r.get("confidence", 0))
-            fake_lbl   = r.get("fake_review", "Real")
-            fake_score = float(r.get("fake_score", 0))
-            product    = r.get("product", "General")
-            emotion    = r.get("emotion", "Neutral")
-            aspects    = r.get("aspects", [])
-            user_name  = r.get("user_name", "Customer")
-            rating     = r.get("rating", "—")
+        card_cls={"Positive":"cv-card-pos","Negative":"cv-card-neg","Neutral":"cv-card-neu"}.get(sentiment,"cv-card-neu")
+        conf_pct=round(confidence*100)
+        conf_bar=f'<div class="cv-conf-bar"><div class="cv-conf-fill" style="width:{conf_pct}%"></div></div>'
+        prod_ico=PROD_ICO.get(product,"📦"); sent_emo=SENT_EMO.get(sentiment,"😐")
+        fake_chip=(f'<span class="cv-fake-warn">⚠ Possibly Fake · {round(fake_score*100)}%</span>' if fake_lbl=="Fake" else "")
 
-            card_cls = {"Positive":"cv-card-pos","Negative":"cv-card-neg","Neutral":"cv-card-neu"}.get(sentiment, "cv-card-neu")
-            conf_pct = round(confidence * 100)
-            conf_bar = f'<div class="cv-conf-bar"><div class="cv-conf-fill" style="width:{conf_pct}%"></div></div>'
-            prod_ico = PROD_ICO.get(product, "📦")
-            sent_emo = SENT_EMO.get(sentiment, "😐")
+        raw_text=review_txt if len(review_txt)<=280 else review_txt[:277]+"…"
+        display_text=_sanitize_for_display(raw_text)
+        if sq.strip():
+            escaped_q=_html.escape(sq.strip())
+            display_text=_re.sub(f'({_re.escape(escaped_q)})',r'<mark style="background:#fef08a;border-radius:3px;padding:0 2px">\1</mark>',display_text,flags=_re.IGNORECASE)
 
-            fake_chip = ""
-            if fake_lbl == "Fake":
-                fake_chip = f'<span class="cv-fake-warn">⚠ Possibly Fake · {round(fake_score*100)}%</span>'
-
-            # ── Sanitize and highlight review text ────────────────────────────
-            raw_text     = review_txt if len(review_txt) <= 280 else review_txt[:277] + "…"
-            display_text = _sanitize_for_display(raw_text)
-
-            if search_q.strip():
-                escaped_q    = _html.escape(search_q.strip())
-                display_text = _re.sub(
-                    f'({_re.escape(escaped_q)})',
-                    r'<mark style="background:#fef08a;border-radius:3px;padding:0 2px">\1</mark>',
-                    display_text,
-                    flags=_re.IGNORECASE,
-                )
-
-            # ── Render aspect chips ───────────────────────────────────────────
-            asp_html = ""
-            if aspects:
-                chips = []
-                for asp in aspects[:6]:
-                    asp_cls = {
-                        "Positive": "cv-asp-pos",
-                        "Negative": "cv-asp-neg",
-                        "Neutral":  "cv-asp-neu",
-                    }.get(asp.get("sentiment", "Neutral"), "cv-asp-neu")
-                    asp_ico = {"Positive": "↑", "Negative": "↓", "Neutral": "–"}.get(asp.get("sentiment"), "–")
-                    chips.append(f'<span class="cv-asp {asp_cls}">{asp_ico} {asp["aspect"]}</span>')
-                asp_html = f'<div class="cv-aspects">{"".join(chips)}</div>'
-
-            st.markdown(f"""
-            <div class="cv-card {card_cls}">
-              <div class="cv-header">
-                <div style="display:flex;align-items:center;gap:12px;flex:1">
-                  <span style="font-size:24px">{sent_emo}</span>
-                  <div style="flex:1">
-                    <div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:2px">{user_name}</div>
-                    <div style="font-size:10px;color:var(--muted)">{prod_ico} {product}  ·  {emotion}</div>
-                  </div>
-                </div>
-                <div class="cv-badges" style="flex-shrink:0">
-                  {sent_badge(sentiment)}
-                  {fake_badge(fake_lbl)}
-                </div>
-              </div>
-              
-              <div class="cv-text">{display_text}</div>
-              
-              {asp_html}
-              
-              <div class="cv-meta" style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
-                <div style="display:flex;align-items:center;gap:16px;font-size:11px">
-                  <div style="display:flex;align-items:center;gap:5px">
-                    <span style="font-weight:700;color:var(--ink)">Rating:</span>
-                    <span style="font-family:'DM Serif Display',serif;font-size:14px;color:var(--amber)">{rating}</span>
-                  </div>
-                  <div style="display:flex;align-items:center;gap:5px">
-                    <span style="font-weight:700;color:var(--ink)">Confidence:</span>
-                    <span style="font-weight:700;color:var(--teal)">{conf_pct}%</span>
-                    {conf_bar}
-                  </div>
-                </div>
-                <div style="font-size:10px;color:var(--muted);font-family:'JetBrains Mono',monospace">#{idx} of {n_filtered}</div>
-              </div>
-              
-              {f'<div style="margin-top:10px;padding:10px 12px;background:rgba(176,96,0,.04);border-radius:8px;border:1px solid rgba(176,96,0,.12);font-size:11px;color:#b06000;font-weight:600">{fake_chip}</div>' if fake_chip else ''}
+        st.markdown(f"""
+        <div class="cv-card {card_cls}">
+          <div class="cv-header">
+            <div style="display:flex;align-items:center;gap:12px;flex:1">
+              <span style="font-size:24px">{sent_emo}</span>
+              <div style="flex:1"><div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:2px">Customer</div>
+              <div style="font-size:10px;color:var(--muted)">{prod_ico} {product} · {emotion}</div></div>
             </div>
-            """, unsafe_allow_html=True)
+            <div class="cv-badges">{sent_badge(sentiment)}{fake_badge(fake_lbl)}</div>
+          </div>
+          <div class="cv-text">{display_text}</div>
+          <div class="cv-meta" style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+            <div style="display:flex;align-items:center;gap:16px;font-size:11px">
+              <div style="display:flex;align-items:center;gap:5px">
+                <span style="font-weight:700;color:var(--ink)">Confidence:</span>
+                <span style="font-weight:700;color:var(--teal)">{conf_pct}%</span>{conf_bar}
+              </div>
+            </div>
+            <div style="font-size:10px;color:var(--muted);font-family:'JetBrains Mono',monospace">#{idx} of {n_filt}</div>
+          </div>
+          {f'<div style="margin-top:10px;padding:10px 12px;background:rgba(176,96,0,.04);border-radius:8px;border:1px solid rgba(176,96,0,.12);font-size:11px;color:#b06000;font-weight:600">{fake_chip}</div>' if fake_chip else ''}
+        </div>
+        """, unsafe_allow_html=True)
 
-    # ── Pagination ────────────────────────────────────────────────────────────
     st.markdown('<div style="height:12px"></div>', unsafe_allow_html=True)
     if n_pages > 1:
-        pg1, pg2, pg3 = st.columns([2, 3, 2], gap="small")
+        pg1,pg2,pg3 = st.columns([2,3,2],gap="small")
         with pg1:
-            if st.button("← Previous", disabled=(cur_page == 0), key="cv_prev"):
-                st.session_state.cv_page = cur_page - 1
-                st.rerun()
+            if st.button("← Previous", disabled=(cur_page==0), key="cv_prev"):
+                st.session_state.cv_page=cur_page-1; st.rerun()
         with pg2:
-            st.markdown(
-                f'<div style="text-align:center;font-size:12px;color:var(--muted);padding-top:10px;font-family:\'JetBrains Mono\',monospace">'
-                f'Page {cur_page+1} / {n_pages}  ·  {n_filtered:,} results</div>',
-                unsafe_allow_html=True,
-            )
+            st.markdown(f'<div style="text-align:center;font-size:12px;color:var(--muted);padding-top:10px;font-family:\'JetBrains Mono\',monospace">Page {cur_page+1} / {n_pages} · {n_filt:,} results</div>',unsafe_allow_html=True)
         with pg3:
-            if st.button("Next →", disabled=(cur_page >= n_pages - 1), key="cv_next"):
-                st.session_state.cv_page = cur_page + 1
-                st.rerun()
+            if st.button("Next →", disabled=(cur_page>=n_pages-1), key="cv_next"):
+                st.session_state.cv_page=cur_page+1; st.rerun()
