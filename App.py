@@ -24,7 +24,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-API_BASE = "http://127.0.0.1:8000"
+API_BASE = "https://sentimentanalysis-s16d.onrender.com"
 
 # ── session state defaults ─────────────────────────────────────────────────────
 for _k, _v in [
@@ -240,7 +240,6 @@ PROD_ICO = {
     "Software & App":   "💻",
     "Finance":          "💰",
     "Grocery & FMCG":   "🛒",
-    "Sellers & Stores": "🏪",
     "General":          "📦",
 }
 
@@ -286,7 +285,7 @@ with st.sidebar:
 
     pages    = ["◈  Home", "◉  Text Analysis", "▦  Batch Upload", "▩  Dashboard", "◎  Product Deep Dive"]
     page_map = {"◈  Home":"Home","◉  Text Analysis":"Text Analysis","▦  Batch Upload":"Batch Upload","▩  Dashboard":"Dashboard","◎  Product Deep Dive":"Product Deep Dive"}
-    idx_map  = {"Home":0,"Text Analysis":1,"Batch Upload":2,"Dashboard":3,"Product Deep Dive":4}
+    idx_map  = {"Home":0,"Text Analysis":1,"Batch Upload":2,"Dashboard":3,"Product Deep Dive":4,"Customer View":5}
 
     sel = st.radio("nav", pages, index=idx_map.get(st.session_state.page, 0), label_visibility="collapsed")
     st.session_state.page = page_map[sel]
@@ -408,7 +407,10 @@ elif page == "Text Analysis":
                           </div>
                         </div>
                         <div class="drow">
-                          
+                          <div class="dleft">
+                            <div class="dico" style="background:var(--amber-pale)">{eico(emotion)}</div>
+                            <div><div class="dlbl">Dominant Emotion</div><div class="dval">{emotion}</div></div>
+                          </div>
                           <div style="text-align:right">
                             <div style="font-size:10px;color:var(--muted);font-family:'JetBrains Mono',monospace">fake score</div>
                             <div style="font-family:'DM Serif Display',serif;font-size:20px;color:{fc}">{fake_score}%</div>
@@ -673,62 +675,32 @@ elif page == "Dashboard":
     # ── Product table ─────────────────────────────────────────────────────────
     # FIX: Avg_Conf stored as 0.0–1.0 in results; multiply ×100 here ONCE
     # then use NumberColumn (not ProgressColumn) to avoid the ×100 double-multiply
-    st.markdown('<div class="sec">By Product & Sub-Category</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec">By Product</div>', unsafe_allow_html=True)
+    prod_df = df.groupby("product").agg(
+        Total     = ("review",      "count"),
+        Positive  = ("sentiment",   lambda x: (x == "Positive").sum()),
+        Negative  = ("sentiment",   lambda x: (x == "Negative").sum()),
+        Neutral   = ("sentiment",   lambda x: (x == "Neutral").sum()),
+        Fake      = ("fake_review", lambda x: (x == "Fake").sum()),
+        Avg_Conf  = ("confidence",  lambda x: round(x.astype(float).mean() * 100, 1)),
+    ).reset_index().rename(columns={"product": "Product", "Avg_Conf": "Avg Conf %"})
+    prod_df = prod_df.sort_values("Total", ascending=False)
 
-    # Tab view: Category summary vs detailed sub-category breakdown
-    tab_cat, tab_sub = st.tabs(["📦 By Category", "🔍 By Sub-Category"])
-
-    with tab_cat:
-        prod_df = df.groupby("product").agg(
-            Total     = ("review",      "count"),
-            Positive  = ("sentiment",   lambda x: (x == "Positive").sum()),
-            Negative  = ("sentiment",   lambda x: (x == "Negative").sum()),
-            Neutral   = ("sentiment",   lambda x: (x == "Neutral").sum()),
-            Fake      = ("fake_review", lambda x: (x == "Fake").sum()),
-            Avg_Conf  = ("confidence",  lambda x: round(x.astype(float).mean() * 100, 1)),
-        ).reset_index().rename(columns={"product": "Category", "Avg_Conf": "Avg Conf %"})
-        prod_df = prod_df.sort_values("Total", ascending=False)
-
-        st.dataframe(
-            prod_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Avg Conf %": st.column_config.ProgressColumn(
-                    "Avg Conf %",
-                    help="Average model confidence (0–100%)",
-                    min_value=0,
-                    max_value=100,
-                    format="%.1f%%",
-                )
-            },
-        )
-
-    with tab_sub:
-        if "sub_category" in df.columns:
-            sub_df = df.groupby(["product", "sub_category"]).agg(
-                Total    = ("review",      "count"),
-                Positive = ("sentiment",   lambda x: (x == "Positive").sum()),
-                Negative = ("sentiment",   lambda x: (x == "Negative").sum()),
-                Fake     = ("fake_review", lambda x: (x == "Fake").sum()),
-                Avg_Conf = ("confidence",  lambda x: round(x.astype(float).mean() * 100, 1)),
-            ).reset_index().rename(columns={
-                "product": "Category", "sub_category": "Sub-Category", "Avg_Conf": "Avg Conf %"
-            })
-            sub_df = sub_df.sort_values("Total", ascending=False)
-            st.dataframe(
-                sub_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Avg Conf %": st.column_config.ProgressColumn(
-                        "Avg Conf %",
-                        min_value=0, max_value=100, format="%.1f%%",
-                    )
-                },
+    st.dataframe(
+        prod_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            # ProgressColumn expects values 0–100 — Avg_Conf is already ×100 above
+            "Avg Conf %": st.column_config.ProgressColumn(
+                "Avg Conf %",
+                help="Average model confidence (0–100%)",
+                min_value=0,
+                max_value=100,
+                format="%.1f%%",
             )
-        else:
-            st.info("Sub-category data not available. Re-run batch analysis to populate.")
+        },
+    )
 
     # ── Duplicate Detection ───────────────────────────────────────────────────
     st.markdown('<div class="sec">Duplicate Detection</div>', unsafe_allow_html=True)
@@ -805,9 +777,12 @@ elif page == "Dashboard":
 # PRODUCT DEEP DIVE
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "Product Deep Dive":
-    st.markdown('<div class="tag tag-violet">◎ Deep Dive</div>', unsafe_allow_html=True)
+    import plotly.graph_objects as go
+    from product_detection import detect_product_full, TAXONOMY
+
+    st.markdown('<div class="tag tag-violet">◎ Product Intelligence</div>', unsafe_allow_html=True)
     st.markdown("## Product Deep Dive")
-    st.markdown('<p style="font-size:13px;color:#6b6860;margin-bottom:22px">Select a product category to drill into sentiment breakdown, aspect performance, top complaints &amp; praise, fake rate, and sub-category comparison.</p>', unsafe_allow_html=True)
+    st.markdown('<p style="font-size:13px;color:#6b6860;margin-bottom:22px">Drill into any product category — sentiment breakdown, sub-category performance, and representative reviews.</p>', unsafe_allow_html=True)
 
     if not backend_ok():
         st.error(f"Backend not reachable at `{API_BASE}`")
@@ -827,238 +802,460 @@ elif page == "Product Deep Dive":
         st.warning("No data yet. Run a Batch Analysis first.")
         st.stop()
 
-    import plotly.graph_objects as go
-    from collections import Counter
-    import re as _re2
+    # ── Re-classify with sub-category (results only have top-level category) ──
+    # We run detect_product_full on each review text so we get sub_category too.
+    # Cache in session_state to avoid re-running on every interaction.
+    cache_key = f"pdd_cache_{len(results)}"
+    if cache_key not in st.session_state:
+        enriched = []
+        for r in results:
+            pr = detect_product_full(r.get("review", ""))
+            enriched.append({**r, "sub_category": pr.sub_category})
+        st.session_state[cache_key] = enriched
+    enriched = st.session_state[cache_key]
 
-    df_dd = pd.DataFrame(results)
-    if "sub_category" not in df_dd.columns:
-        df_dd["sub_category"] = "General"
+    df_pdd  = pd.DataFrame(enriched)
+    total   = len(df_pdd)
 
-    # ── Product selector ──────────────────────────────────────────────────────
-    all_cats  = sorted(df_dd["product"].dropna().unique().tolist())
+    # ── Category selector ─────────────────────────────────────────────────────
+    all_cats = sorted(df_pdd["product"].dropna().unique().tolist())
     if not all_cats:
-        st.warning("No product categories detected in results.")
+        st.warning("No product categories found in results.")
         st.stop()
 
-    sel_col, _ = st.columns([3, 5])
-    with sel_col:
-        sel_cat = st.selectbox(
-            "Select a product category to drill into",
-            all_cats,
-            label_visibility="collapsed",
-        )
+    plo_base = dict(
+        margin=dict(t=36, b=16, l=0, r=0), height=220,
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Syne, sans-serif", size=11, color="#6b6860"),
+        showlegend=True,
+        legend=dict(font=dict(size=10), orientation="h", y=-0.25),
+    )
 
-    df_cat = df_dd[df_dd["product"] == sel_cat]
+    # ── Overview strip: one KPI per category ─────────────────────────────────
+    st.markdown('<div class="sec">Category Overview</div>', unsafe_allow_html=True)
+
+    cat_summary = []
+    for cat in all_cats:
+        sub = df_pdd[df_pdd["product"] == cat]
+        n   = len(sub)
+        pos = int((sub["sentiment"] == "Positive").sum())
+        neg = int((sub["sentiment"] == "Negative").sum())
+        fk  = int((sub["fake_review"] == "Fake").sum())
+        avg_conf = round(sub["confidence"].astype(float).mean() * 100, 1)
+        cat_summary.append({"cat": cat, "n": n, "pos": pos, "neg": neg, "fake": fk, "conf": avg_conf})
+
+    cat_summary.sort(key=lambda x: -x["n"])
+
+    # Render as a scrollable overview grid
+    grid_html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:24px">'
+    for cs in cat_summary:
+        ico = PROD_ICO.get(cs["cat"], "📦")
+        pos_pct = round(cs["pos"] / cs["n"] * 100) if cs["n"] else 0
+        neg_pct = round(cs["neg"] / cs["n"] * 100) if cs["n"] else 0
+        bar_pos = f'<div style="height:4px;background:rgba(12,12,14,.08);border-radius:10px;margin-top:8px;overflow:hidden"><div style="width:{pos_pct}%;height:100%;background:linear-gradient(90deg,var(--teal),#1cbfac);border-radius:10px"></div></div>'
+        grid_html += f'''<div class="kpi" style="--kc:var(--teal);cursor:pointer" onclick="void(0)">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start">
+            <div style="font-size:20px">{ico}</div>
+            <div style="font-size:10px;font-weight:700;color:var(--muted);font-family:\'JetBrains Mono\',monospace">{cs["n"]} reviews</div>
+          </div>
+          <div style="font-size:12px;font-weight:700;margin:6px 0 2px">{cs["cat"]}</div>
+          <div style="font-size:10px;color:var(--muted)">{pos_pct}% pos · {neg_pct}% neg · {cs["fake"]} fake</div>
+          {bar_pos}
+        </div>'''
+    grid_html += '</div>'
+    st.markdown(grid_html, unsafe_allow_html=True)
+
+    # ── Category deep-dive selector ───────────────────────────────────────────
+    st.markdown('<div class="sec">Deep Dive — Select a Category</div>', unsafe_allow_html=True)
+    sel_cat = st.selectbox("Product category", all_cats, label_visibility="collapsed")
+
+    df_cat = df_pdd[df_pdd["product"] == sel_cat].copy()
     n_cat  = len(df_cat)
 
     if n_cat == 0:
-        st.info(f"No reviews found for **{sel_cat}**.")
+        st.info(f"No reviews found for {sel_cat}.")
         st.stop()
 
-    # ── KPI strip ─────────────────────────────────────────────────────────────
-    sc_cat   = df_cat["sentiment"].value_counts().to_dict()
-    pos_cat  = sc_cat.get("Positive", 0)
-    neg_cat  = sc_cat.get("Negative", 0)
-    neu_cat  = sc_cat.get("Neutral",  0)
-    fake_cat = int((df_cat["fake_review"] == "Fake").sum())
-    avg_conf = round(df_cat["confidence"].astype(float).mean() * 100, 1)
-    n_subs   = df_cat["sub_category"].nunique()
+    cat_pos  = int((df_cat["sentiment"] == "Positive").sum())
+    cat_neg  = int((df_cat["sentiment"] == "Negative").sum())
+    cat_neu  = int((df_cat["sentiment"] == "Neutral").sum())
+    cat_fake = int((df_cat["fake_review"] == "Fake").sum())
+    cat_conf = round(df_cat["confidence"].astype(float).mean() * 100, 1)
 
-    prod_ico_dd = PROD_ICO.get(sel_cat, "📦")
-    st.markdown(f'<div style="font-family:\'DM Serif Display\',serif;font-size:26px;margin:16px 0 4px">{prod_ico_dd} {sel_cat}</div>', unsafe_allow_html=True)
-    st.markdown(f'<div style="font-size:12px;color:var(--muted);margin-bottom:20px;font-family:\'JetBrains Mono\',monospace">{n_cat:,} reviews  ·  {n_subs} sub-categories</div>', unsafe_allow_html=True)
-
+    # ── Category KPI row ──────────────────────────────────────────────────────
+    ico_sel = PROD_ICO.get(sel_cat, "📦")
     k1, k2, k3, k4, k5 = st.columns(5)
-    for col, (color, lbl, val, sub) in zip([k1,k2,k3,k4,k5], [
-        ("#2563eb",        "Total",      f"{n_cat:,}",   "reviews"),
-        ("var(--teal)",    "Positive",   str(pos_cat),   pct(pos_cat, n_cat)),
-        ("var(--amber)",   "Neutral",    str(neu_cat),   pct(neu_cat, n_cat)),
-        ("var(--rose)",    "Negative",   str(neg_cat),   pct(neg_cat, n_cat)),
-        ("#b06000",        "Fake",       str(fake_cat),  pct(fake_cat, n_cat) + " flagged"),
-    ]):
-        col.markdown(f'<div class="kpi" style="--kc:{color}"><div class="kpi-lbl">{lbl}</div><div class="kpi-val">{val}</div><div class="kpi-sub">{sub}</div></div>', unsafe_allow_html=True)
+    k1.markdown(f'<div class="kpi" style="--kc:#2563eb"><div class="kpi-em">{ico_sel}</div><div class="kpi-lbl">Reviews</div><div class="kpi-val">{n_cat:,}</div><div class="kpi-sub">in {sel_cat}</div></div>', unsafe_allow_html=True)
+    k2.markdown(f'<div class="kpi" style="--kc:var(--teal)"><div class="kpi-em">😊</div><div class="kpi-lbl">Positive</div><div class="kpi-val">{cat_pos}</div><div class="kpi-sub">{pct(cat_pos,n_cat)}</div></div>', unsafe_allow_html=True)
+    k3.markdown(f'<div class="kpi" style="--kc:var(--amber)"><div class="kpi-em">😐</div><div class="kpi-lbl">Neutral</div><div class="kpi-val">{cat_neu}</div><div class="kpi-sub">{pct(cat_neu,n_cat)}</div></div>', unsafe_allow_html=True)
+    k4.markdown(f'<div class="kpi" style="--kc:var(--rose)"><div class="kpi-em">😞</div><div class="kpi-lbl">Negative</div><div class="kpi-val">{cat_neg}</div><div class="kpi-sub">{pct(cat_neg,n_cat)}</div></div>', unsafe_allow_html=True)
+    k5.markdown(f'<div class="kpi" style="--kc:#b06000"><div class="kpi-em">🕵️</div><div class="kpi-lbl">Fake</div><div class="kpi-val">{cat_fake}</div><div class="kpi-sub">{pct(cat_fake,n_cat)} · {cat_conf}% conf</div></div>', unsafe_allow_html=True)
 
-    st.markdown('<div style="height:6px"></div>', unsafe_allow_html=True)
+    # ── Charts row ────────────────────────────────────────────────────────────
+    st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+    ch1, ch2 = st.columns(2)
 
-    # ── Row 1: Sentiment donut + Sub-category breakdown ───────────────────────
-    st.markdown('<div class="sec">Sentiment &amp; Sub-Category Breakdown</div>', unsafe_allow_html=True)
-    rc1, rc2 = st.columns([1, 2], gap="large")
-
-    plo_dd = dict(margin=dict(t=30, b=10, l=0, r=0), height=240,
-                  paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                  font=dict(family="Syne, sans-serif", size=11, color="#6b6860"),
-                  showlegend=True, legend=dict(font=dict(size=10), orientation="h", y=-0.18))
-
-    with rc1:
-        fig_sent = go.Figure(go.Pie(
+    with ch1:
+        fig = go.Figure(go.Pie(
             labels=["Positive","Neutral","Negative"],
-            values=[pos_cat, neu_cat, neg_cat],
+            values=[cat_pos, cat_neu, cat_neg],
             hole=0.62,
             marker=dict(colors=["#0f7c6e","#c47b0a","#b83348"], line=dict(color="white", width=3)),
             textinfo="none", hoverinfo="label+percent+value",
         ))
-        fig_sent.update_layout(title=dict(text="Sentiment split", font=dict(size=11), x=0.5), **plo_dd)
-        st.plotly_chart(fig_sent, use_container_width=True, config={"displayModeBar": False})
+        fig.update_layout(title=dict(text=f"Sentiment — {sel_cat}", font=dict(size=11), x=0.5), **plo_base)
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-    with rc2:
-        sub_df = df_cat.groupby("sub_category").agg(
-            Total    = ("review",    "count"),
-            Positive = ("sentiment", lambda x: (x=="Positive").sum()),
-            Negative = ("sentiment", lambda x: (x=="Negative").sum()),
-            Neutral  = ("sentiment", lambda x: (x=="Neutral").sum()),
-            Fake     = ("fake_review", lambda x: (x=="Fake").sum()),
-        ).reset_index().sort_values("Total", ascending=False)
+    with ch2:
+        fig2 = go.Figure(go.Pie(
+            labels=["Real","Fake"],
+            values=[n_cat - cat_fake, cat_fake],
+            hole=0.62,
+            marker=dict(colors=["#0f7c6e","#b06000"], line=dict(color="white", width=3)),
+            textinfo="none", hoverinfo="label+percent+value",
+        ))
+        fig2.update_layout(title=dict(text=f"Authenticity — {sel_cat}", font=dict(size=11), x=0.5), **plo_base)
+        st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
 
-        # Horizontal stacked bar per sub-category
-        subs  = sub_df["sub_category"].tolist()
-        fig_sub = go.Figure()
-        for lbl, color in [("Positive","#0f7c6e"),("Neutral","#c47b0a"),("Negative","#b83348")]:
-            fig_sub.add_trace(go.Bar(
-                name=lbl, y=subs, x=sub_df[lbl].tolist(),
-                orientation="h",
-                marker_color=color,
-                hovertemplate=f"%{{y}}<br>{lbl}: %{{x}}<extra></extra>",
-            ))
-        fig_sub.update_layout(
-            barmode="stack",
-            title=dict(text="Reviews per sub-category", font=dict(size=11), x=0),
-            xaxis=dict(showgrid=False),
-            yaxis=dict(tickfont=dict(size=10)),
-            **plo_dd,
-        )
-        st.plotly_chart(fig_sub, use_container_width=True, config={"displayModeBar": False})
-
-    # ── Row 2: Top complaints vs top praise ───────────────────────────────────
-    st.markdown('<div class="sec">Top Complaints vs Top Praise</div>', unsafe_allow_html=True)
-
-    _STOP_DD = {
-        "the","and","for","are","but","not","you","all","can","was","one","our",
-        "out","get","has","how","its","new","now","see","use","this","that","with",
-        "from","have","very","well","like","just","been","more","when","than","they",
-        "were","what","will","your","also","much","into","only","some","would",
-        "could","really","great","good","product","item","order","it","is","my",
-        "me","so","an","a","i","to","in","of","on","at","be","do","by","if",
-    }
-
-    def _top_kw_dd(texts, n=8):
-        ctr = Counter()
-        for t in texts:
-            for w in _re2.findall(r"[a-z]{3,}", t.lower()):
-                if w not in _STOP_DD:
-                    ctr[w] += 1
-        return ctr.most_common(n)
-
-    neg_reviews = df_cat[df_cat["sentiment"] == "Negative"]["review"].tolist()
-    pos_reviews = df_cat[df_cat["sentiment"] == "Positive"]["review"].tolist()
-    neg_kws = _top_kw_dd(neg_reviews)
-    pos_kws = _top_kw_dd(pos_reviews)
-
-    kw1, kw2 = st.columns(2, gap="large")
-
-    with kw1:
-        st.markdown('<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--rose);margin-bottom:10px">↓ Top complaint keywords</div>', unsafe_allow_html=True)
-        if neg_kws:
-            max_c = neg_kws[0][1] if neg_kws else 1
-            for word, cnt in neg_kws:
-                bar_w = int(cnt / max_c * 100)
-                st.markdown(f'''
-                <div style="display:flex;align-items:center;gap:10px;margin-bottom:7px">
-                  <div style="width:90px;font-size:12px;font-weight:600;color:var(--ink)">{word}</div>
-                  <div style="flex:1;height:7px;background:rgba(12,12,14,.07);border-radius:100px;overflow:hidden">
-                    <div style="height:100%;width:{bar_w}%;background:var(--rose);border-radius:100px"></div>
-                  </div>
-                  <div style="width:28px;text-align:right;font-size:11px;color:var(--muted);font-family:\'JetBrains Mono\',monospace">{cnt}</div>
-                </div>''', unsafe_allow_html=True)
-        else:
-            st.markdown('<div style="font-size:12px;color:var(--muted)">No negative reviews for this category.</div>', unsafe_allow_html=True)
-
-    with kw2:
-        st.markdown('<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--teal);margin-bottom:10px">↑ Top praise keywords</div>', unsafe_allow_html=True)
-        if pos_kws:
-            max_c = pos_kws[0][1] if pos_kws else 1
-            for word, cnt in pos_kws:
-                bar_w = int(cnt / max_c * 100)
-                st.markdown(f'''
-                <div style="display:flex;align-items:center;gap:10px;margin-bottom:7px">
-                  <div style="width:90px;font-size:12px;font-weight:600;color:var(--ink)">{word}</div>
-                  <div style="flex:1;height:7px;background:rgba(12,12,14,.07);border-radius:100px;overflow:hidden">
-                    <div style="height:100%;width:{bar_w}%;background:var(--teal);border-radius:100px"></div>
-                  </div>
-                  <div style="width:28px;text-align:right;font-size:11px;color:var(--muted);font-family:\'JetBrains Mono\',monospace">{cnt}</div>
-                </div>''', unsafe_allow_html=True)
-        else:
-            st.markdown('<div style="font-size:12px;color:var(--muted)">No positive reviews for this category.</div>', unsafe_allow_html=True)
-
-    # ── Row 3: Fake rate + confidence vs dataset average ──────────────────────
-    st.markdown('<div class="sec">Fake Rate &amp; Confidence vs Dataset Average</div>', unsafe_allow_html=True)
-
-    total_all    = len(df_dd)
-    fake_all_pct = round((df_dd["fake_review"] == "Fake").sum() / total_all * 100, 1) if total_all else 0
-    fake_cat_pct = round(fake_cat / n_cat * 100, 1) if n_cat else 0
-    conf_all     = round(df_dd["confidence"].astype(float).mean() * 100, 1)
-
-    cm1, cm2, cm3, cm4 = st.columns(4)
-    for col, (color, lbl, v_cat, v_all, suffix) in zip([cm1, cm2, cm3, cm4], [
-        ("var(--rose)",   "Fake rate — this category",  f"{fake_cat_pct}%",  f"Dataset avg: {fake_all_pct}%",   ""),
-        ("#b06000",       "Fake count — this category", str(fake_cat),       f"of {n_cat} reviews",             ""),
-        ("var(--teal)",   "Avg confidence — this cat",  f"{avg_conf}%",      f"Dataset avg: {conf_all}%",       ""),
-        ("var(--violet)", "Sub-categories",             str(n_subs),         f"in {sel_cat}",                   ""),
-    ]):
-        col.markdown(f'<div class="kpi" style="--kc:{color}"><div class="kpi-lbl">{lbl}</div><div class="kpi-val">{v_cat}</div><div class="kpi-sub">{v_all}</div></div>', unsafe_allow_html=True)
-
-    # ── Row 4: Sub-category detail table ──────────────────────────────────────
+    # ── Sub-category detail table ─────────────────────────────────────────────
     st.markdown('<div class="sec">Sub-Category Detail</div>', unsafe_allow_html=True)
 
-    sub_tbl = sub_df.copy()
-    sub_tbl["Fake %"]   = (sub_tbl["Fake"] / sub_tbl["Total"] * 100).round(1)
-    sub_tbl["Pos %"]    = (sub_tbl["Positive"] / sub_tbl["Total"] * 100).round(1)
-    sub_tbl["Neg %"]    = (sub_tbl["Negative"] / sub_tbl["Total"] * 100).round(1)
-    sub_tbl = sub_tbl.rename(columns={"sub_category": "Sub-Category"})
-    sub_tbl = sub_tbl[["Sub-Category","Total","Positive","Neutral","Negative","Pos %","Neg %","Fake","Fake %"]]
+    sub_rows = []
+    for sub_name in df_cat["sub_category"].dropna().unique():
+        sub_df = df_cat[df_cat["sub_category"] == sub_name]
+        n_s    = len(sub_df)
+        pos_s  = int((sub_df["sentiment"] == "Positive").sum())
+        neu_s  = int((sub_df["sentiment"] == "Neutral").sum())
+        neg_s  = int((sub_df["sentiment"] == "Negative").sum())
+        fk_s   = int((sub_df["fake_review"] == "Fake").sum())
+        conf_s = round(sub_df["confidence"].astype(float).mean() * 100, 1)
+        sub_rows.append({
+            "Sub-Category": sub_name,
+            "Total":    n_s,
+            "Positive": pos_s,
+            "Neutral":  neu_s,
+            "Negative": neg_s,
+            "Pos %":    round(pos_s / n_s * 100, 1) if n_s else 0.0,
+            "Neg %":    round(neg_s / n_s * 100, 1) if n_s else 0.0,
+            "Fake":     fk_s,
+            "Fake %":   round(fk_s / n_s * 100, 1) if n_s else 0.0,
+            "Avg Conf %": conf_s,
+        })
 
-    st.dataframe(
-        sub_tbl,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Pos %":  st.column_config.ProgressColumn("Pos %",  min_value=0, max_value=100, format="%.1f%%"),
-            "Neg %":  st.column_config.ProgressColumn("Neg %",  min_value=0, max_value=100, format="%.1f%%"),
-            "Fake %": st.column_config.ProgressColumn("Fake %", min_value=0, max_value=100, format="%.1f%%"),
-        },
+    if sub_rows:
+        sub_df_display = pd.DataFrame(sub_rows).sort_values("Total", ascending=False)
+        st.dataframe(
+            sub_df_display,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Pos %": st.column_config.ProgressColumn("Pos %", min_value=0, max_value=100, format="%.1f%%"),
+                "Neg %": st.column_config.ProgressColumn("Neg %", min_value=0, max_value=100, format="%.1f%%"),
+                "Fake %": st.column_config.ProgressColumn("Fake %", min_value=0, max_value=100, format="%.1f%%"),
+                "Avg Conf %": st.column_config.ProgressColumn("Avg Conf %", min_value=0, max_value=100, format="%.1f%%"),
+            },
+        )
+    else:
+        st.info("No sub-category data available for this category.")
+
+    # ── Sub-category selector for representative reviews ──────────────────────
+    st.markdown('<div class="sec">Representative Reviews</div>', unsafe_allow_html=True)
+
+    avail_subs = ["All Sub-Categories"] + sorted(df_cat["sub_category"].dropna().unique().tolist())
+    sel_sub    = st.selectbox("Sub-category filter", avail_subs, label_visibility="collapsed")
+
+    df_sub = df_cat if sel_sub == "All Sub-Categories" else df_cat[df_cat["sub_category"] == sel_sub]
+
+    neg_samples  = df_sub[df_sub["sentiment"] == "Negative"]["review"].tolist()[:5]
+    pos_samples  = df_sub[df_sub["sentiment"] == "Positive"]["review"].tolist()[:5]
+
+    col_neg, col_pos = st.columns(2)
+
+    with col_neg:
+        st.markdown('<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--rose);margin-bottom:10px">↓ Negative Samples</div>', unsafe_allow_html=True)
+        if neg_samples:
+            for rev in neg_samples:
+                rev_display = _sanitize_for_display(rev[:200] + ("…" if len(rev) > 200 else ""))
+                sub_tag = df_sub[df_sub["review"] == rev]["sub_category"].values
+                sub_lbl = sub_tag[0] if len(sub_tag) else sel_cat
+                conf_v  = df_sub[df_sub["review"] == rev]["confidence"].values
+                conf_pct_v = round(float(conf_v[0]) * 100) if len(conf_v) else 0
+                st.markdown(f'''<div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--rose);border-radius:12px;padding:14px 16px;margin-bottom:8px">
+                  <div style="font-size:13px;line-height:1.65;color:var(--ink);margin-bottom:8px">{rev_display}</div>
+                  <div style="font-size:10px;color:var(--muted)">{sub_lbl} · <span style="color:var(--teal);font-weight:700">{conf_pct_v}% conf</span></div>
+                </div>''', unsafe_allow_html=True)
+        else:
+            st.markdown('<div style="font-size:13px;color:var(--muted);padding:16px 0">No negative reviews.</div>', unsafe_allow_html=True)
+
+    with col_pos:
+        st.markdown('<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--teal);margin-bottom:10px">↑ Positive Samples</div>', unsafe_allow_html=True)
+        if pos_samples:
+            for rev in pos_samples:
+                rev_display = _sanitize_for_display(rev[:200] + ("…" if len(rev) > 200 else ""))
+                sub_tag = df_sub[df_sub["review"] == rev]["sub_category"].values
+                sub_lbl = sub_tag[0] if len(sub_tag) else sel_cat
+                conf_v  = df_sub[df_sub["review"] == rev]["confidence"].values
+                conf_pct_v = round(float(conf_v[0]) * 100) if len(conf_v) else 0
+                st.markdown(f'''<div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--teal);border-radius:12px;padding:14px 16px;margin-bottom:8px">
+                  <div style="font-size:13px;line-height:1.65;color:var(--ink);margin-bottom:8px">{rev_display}</div>
+                  <div style="font-size:10px;color:var(--muted)">{sub_lbl} · <span style="color:var(--teal);font-weight:700">{conf_pct_v}% conf</span></div>
+                </div>''', unsafe_allow_html=True)
+        else:
+            st.markdown('<div style="font-size:13px;color:var(--muted);padding:16px 0">No positive reviews.</div>', unsafe_allow_html=True)
+
+    # ── Download filtered ─────────────────────────────────────────────────────
+    st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+    dl_df = df_cat[["review","sentiment","sub_category","fake_review","confidence"]].copy()
+    dl_df["confidence"] = (dl_df["confidence"].astype(float) * 100).round(1).astype(str) + "%"
+    st.download_button(
+        f"↓ Download {sel_cat} reviews CSV",
+        data=dl_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"{sel_cat.lower().replace(' ','_')}_reviews.csv",
+        mime="text/csv",
     )
 
-    # ── Row 5: Representative review snippets ─────────────────────────────────
-    st.markdown('<div class="sec">Representative Reviews</div>', unsafe_allow_html=True)
-    snip1, snip2 = st.columns(2, gap="large")
+# ══════════════════════════════════════════════════════════════════════════════
+# CUSTOMER VIEW
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "Customer View":
+    st.markdown('<div class="tag tag-teal">◎ Customer View</div>', unsafe_allow_html=True)
+    st.markdown("## What customers are saying")
+    st.markdown('<p style="font-size:13px;color:#6b6860;margin-bottom:22px">Browse reviews by product category, filter by sentiment & authenticity, and search across all fields without area restrictions.</p>', unsafe_allow_html=True)
 
-    def _render_snippets(col, reviews_subset, sentiment, color, icon):
-        with col:
-            st.markdown(f'<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:{color};margin-bottom:10px">{icon} {sentiment} samples</div>', unsafe_allow_html=True)
-            sample = reviews_subset[:4]
-            if not sample:
-                st.markdown(f'<div style="font-size:12px;color:var(--muted)">No {sentiment.lower()} reviews.</div>', unsafe_allow_html=True)
-                return
-            for rv in sample:
-                txt = rv.get("review","")
-                txt = txt[:160] + "…" if len(txt) > 160 else txt
-                txt = _sanitize_for_display(txt)
-                conf_pct_s = round(float(rv.get("confidence",0))*100)
-                fake_s     = rv.get("fake_review","Real")
-                sub_s      = rv.get("sub_category","")
-                fake_chip_s = f'<span style="font-size:9px;background:#fff0e0;color:#b06000;border:1px solid rgba(176,96,0,.2);padding:1px 7px;border-radius:100px;font-weight:700">⚠ Fake</span>' if fake_s == "Fake" else ""
-                st.markdown(f'''
-                <div style="background:var(--bg);border:1px solid var(--border);border-left:3px solid {color};border-radius:10px;padding:12px 14px;margin-bottom:8px">
-                  <div style="font-size:12px;line-height:1.65;color:var(--ink);margin-bottom:8px">{txt}</div>
-                  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-                    <span style="font-size:10px;color:var(--muted)">{sub_s}</span>
-                    <span style="font-size:10px;color:var(--muted)">·</span>
-                    <span style="font-size:10px;font-weight:700;color:{color}">{conf_pct_s}% conf</span>
-                    {fake_chip_s}
+    if not backend_ok():
+        st.error(f"Backend not reachable at `{API_BASE}`")
+        st.stop()
+
+    with st.spinner("Loading reviews…"):
+        try:
+            res  = requests.get(f"{API_BASE}/results", timeout=10)
+            res.raise_for_status()
+            data    = res.json()
+            results = data.get("results", [])
+        except Exception as e:
+            st.error(f"Could not load results: {e}")
+            st.stop()
+
+    if not results:
+        st.warning("No data yet. Run a Batch Analysis first.")
+        st.stop()
+
+    df_cv = pd.DataFrame(results)
+    total = len(df_cv)
+    fname = data.get("file_name", "")
+
+    # ── Initialize session state ──────────────────────────────────────────────────
+    for k, v in [("cv_sent","All"),("cv_fake","All"),("cv_cat","All"),("cv_search",""),("cv_page",0),("cv_search_fields",["Review", "Product"])]:
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    sc_   = df_cv["sentiment"].value_counts().to_dict()
+    pos_c = sc_.get("Positive", 0)
+    neg_c = sc_.get("Negative", 0)
+    neu_c = sc_.get("Neutral",  0)
+    fk_c  = int((df_cv["fake_review"] == "Fake").sum())
+
+    st.markdown(f"""
+    <div class="cv-stat-strip">
+      <div class="cv-stat"><div class="cv-stat-lbl">Total Reviews</div><div class="cv-stat-val" style="color:#2563eb">{total:,}</div><div class="cv-stat-sub">{fname or "dataset"}</div></div>
+      <div class="cv-stat"><div class="cv-stat-lbl">Positive</div><div class="cv-stat-val" style="color:var(--teal)">{pos_c}</div><div class="cv-stat-sub">{pct(pos_c,total)}</div></div>
+      <div class="cv-stat"><div class="cv-stat-lbl">Negative</div><div class="cv-stat-val" style="color:var(--rose)">{neg_c}</div><div class="cv-stat-sub">{pct(neg_c,total)}</div></div>
+      <div class="cv-stat"><div class="cv-stat-lbl">Flagged Fake</div><div class="cv-stat-val" style="color:#b06000">{fk_c}</div><div class="cv-stat-sub">{pct(fk_c,total)}</div></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Advanced Filters ──────────────────────────────────────────────────────────
+    st.markdown('<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin:20px 0 12px">Filters & Search</div>', unsafe_allow_html=True)
+
+    fc1, fc2, fc3, fc4 = st.columns([2.5, 1.8, 1.8, 1.8], gap="small")
+
+    with fc1:
+        search_q = st.text_input("🔍 Global search", value=st.session_state.cv_search,
+                                  placeholder="Search across reviews, products, sentiment…", label_visibility="collapsed")
+        if search_q != st.session_state.cv_search:
+            st.session_state.cv_search = search_q
+            st.session_state.cv_page   = 0
+
+    with fc2:
+        sent_opts = ["All Sentiments", "Positive", "Negative", "Neutral"]
+        sent_sel  = st.selectbox("Sentiment", sent_opts,
+                                  index=sent_opts.index(st.session_state.cv_sent) if st.session_state.cv_sent in sent_opts else 0,
+                                  label_visibility="collapsed")
+        if sent_sel != st.session_state.cv_sent:
+            st.session_state.cv_sent = sent_sel
+            st.session_state.cv_page = 0
+
+    with fc3:
+        fake_opts = ["All Reviews", "Real Only", "Fake Only"]
+        fake_sel  = st.selectbox("Authenticity", fake_opts,
+                                  index=fake_opts.index(st.session_state.cv_fake) if st.session_state.cv_fake in fake_opts else 0,
+                                  label_visibility="collapsed")
+        if fake_sel != st.session_state.cv_fake:
+            st.session_state.cv_fake = fake_sel
+            st.session_state.cv_page = 0
+
+    with fc4:
+        cat_vals = ["All Categories"] + sorted(df_cv["product"].dropna().unique().tolist())
+        cat_sel  = st.selectbox("Product Category", cat_vals,
+                                  index=cat_vals.index(st.session_state.cv_cat) if st.session_state.cv_cat in cat_vals else 0,
+                                  label_visibility="collapsed")
+        if cat_sel != st.session_state.cv_cat:
+            st.session_state.cv_cat = cat_sel
+            st.session_state.cv_page = 0
+
+    # ── Apply all filters ─────────────────────────────────────────────────────────
+    filtered = results[:]
+    
+    if sent_sel != "All Sentiments":
+        filtered = [r for r in filtered if r.get("sentiment") == sent_sel]
+    
+    if fake_sel == "Real Only":
+        filtered = [r for r in filtered if r.get("fake_review") == "Real"]
+    elif fake_sel == "Fake Only":
+        filtered = [r for r in filtered if r.get("fake_review") == "Fake"]
+    
+    if cat_sel != "All Categories":
+        filtered = [r for r in filtered if r.get("product") == cat_sel]
+    
+    # ── Unlimited search across all fields (no area restriction) ────────────────
+    if search_q.strip():
+        q_lower = search_q.strip().lower()
+        filtered = [
+            r for r in filtered
+            if (q_lower in r.get("review", "").lower() or
+                q_lower in r.get("product", "").lower() or
+                q_lower in r.get("sentiment", "").lower() or
+                q_lower in r.get("emotion", "").lower() or
+                q_lower in r.get("fake_review", "").lower())
+        ]
+
+    n_filtered = len(filtered)
+    PAGE_SIZE  = 10
+    n_pages    = max(1, (n_filtered + PAGE_SIZE - 1) // PAGE_SIZE)
+    cur_page   = min(st.session_state.cv_page, n_pages - 1)
+    page_start = cur_page * PAGE_SIZE
+    page_end   = min(page_start + PAGE_SIZE, n_filtered)
+    page_items = filtered[page_start:page_end]
+
+    # ── Results summary ───────────────────────────────────────────────────────────
+    summary_text = f'Showing {page_start+1}–{page_end} of {n_filtered:,} reviews'
+    if n_filtered < total:
+        summary_text += f'  ·  <strong>filtered</strong> from {total:,} total'
+    
+    st.markdown(
+        f'<div style="font-size:11px;color:var(--muted);margin:16px 0 20px;font-family:\'JetBrains Mono\',monospace">{summary_text}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Review cards with enhanced layout ──────────────────────────────────────
+    if not page_items:
+        st.markdown('<div class="cv-no-results">No reviews match the current filters.</div>', unsafe_allow_html=True)
+    else:
+        SENT_EMO = {"Positive": "😊", "Negative": "😞", "Neutral": "😐"}
+
+        for idx, r in enumerate(page_items, start=page_start+1):
+            review_txt = r.get("review", "")
+            sentiment  = r.get("sentiment", "Neutral")
+            confidence = float(r.get("confidence", 0))
+            fake_lbl   = r.get("fake_review", "Real")
+            fake_score = float(r.get("fake_score", 0))
+            product    = r.get("product", "General")
+            emotion    = r.get("emotion", "Neutral")
+            aspects    = r.get("aspects", [])
+            user_name  = r.get("user_name", "Customer")
+            rating     = r.get("rating", "—")
+
+            card_cls = {"Positive":"cv-card-pos","Negative":"cv-card-neg","Neutral":"cv-card-neu"}.get(sentiment, "cv-card-neu")
+            conf_pct = round(confidence * 100)
+            conf_bar = f'<div class="cv-conf-bar"><div class="cv-conf-fill" style="width:{conf_pct}%"></div></div>'
+            prod_ico = PROD_ICO.get(product, "📦")
+            sent_emo = SENT_EMO.get(sentiment, "😐")
+
+            fake_chip = ""
+            if fake_lbl == "Fake":
+                fake_chip = f'<span class="cv-fake-warn">⚠ Possibly Fake · {round(fake_score*100)}%</span>'
+
+            # ── Sanitize and highlight review text ────────────────────────────
+            raw_text     = review_txt if len(review_txt) <= 280 else review_txt[:277] + "…"
+            display_text = _sanitize_for_display(raw_text)
+
+            if search_q.strip():
+                escaped_q    = _html.escape(search_q.strip())
+                display_text = _re.sub(
+                    f'({_re.escape(escaped_q)})',
+                    r'<mark style="background:#fef08a;border-radius:3px;padding:0 2px">\1</mark>',
+                    display_text,
+                    flags=_re.IGNORECASE,
+                )
+
+            # ── Render aspect chips ───────────────────────────────────────────
+            asp_html = ""
+            if aspects:
+                chips = []
+                for asp in aspects[:6]:
+                    asp_cls = {
+                        "Positive": "cv-asp-pos",
+                        "Negative": "cv-asp-neg",
+                        "Neutral":  "cv-asp-neu",
+                    }.get(asp.get("sentiment", "Neutral"), "cv-asp-neu")
+                    asp_ico = {"Positive": "↑", "Negative": "↓", "Neutral": "–"}.get(asp.get("sentiment"), "–")
+                    chips.append(f'<span class="cv-asp {asp_cls}">{asp_ico} {asp["aspect"]}</span>')
+                asp_html = f'<div class="cv-aspects">{"".join(chips)}</div>'
+
+            st.markdown(f"""
+            <div class="cv-card {card_cls}">
+              <div class="cv-header">
+                <div style="display:flex;align-items:center;gap:12px;flex:1">
+                  <span style="font-size:24px">{sent_emo}</span>
+                  <div style="flex:1">
+                    <div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:2px">{user_name}</div>
+                    <div style="font-size:10px;color:var(--muted)">{prod_ico} {product}  ·  {emotion}</div>
                   </div>
-                </div>''', unsafe_allow_html=True)
+                </div>
+                <div class="cv-badges" style="flex-shrink:0">
+                  {sent_badge(sentiment)}
+                  {fake_badge(fake_lbl)}
+                </div>
+              </div>
+              
+              <div class="cv-text">{display_text}</div>
+              
+              {asp_html}
+              
+              <div class="cv-meta" style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+                <div style="display:flex;align-items:center;gap:16px;font-size:11px">
+                  <div style="display:flex;align-items:center;gap:5px">
+                    <span style="font-weight:700;color:var(--ink)">Rating:</span>
+                    <span style="font-family:'DM Serif Display',serif;font-size:14px;color:var(--amber)">{rating}</span>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:5px">
+                    <span style="font-weight:700;color:var(--ink)">Confidence:</span>
+                    <span style="font-weight:700;color:var(--teal)">{conf_pct}%</span>
+                    {conf_bar}
+                  </div>
+                </div>
+                <div style="font-size:10px;color:var(--muted);font-family:'JetBrains Mono',monospace">#{idx} of {n_filtered}</div>
+              </div>
+              
+              {f'<div style="margin-top:10px;padding:10px 12px;background:rgba(176,96,0,.04);border-radius:8px;border:1px solid rgba(176,96,0,.12);font-size:11px;color:#b06000;font-weight:600">{fake_chip}</div>' if fake_chip else ''}
+            </div>
+            """, unsafe_allow_html=True)
 
-    neg_sample = df_cat[df_cat["sentiment"]=="Negative"].head(4).to_dict("records")
-    pos_sample = df_cat[df_cat["sentiment"]=="Positive"].head(4).to_dict("records")
-    _render_snippets(snip1, neg_sample, "Negative", "var(--rose)", "↓")
-    _render_snippets(snip2, pos_sample, "Positive", "var(--teal)", "↑")
+    # ── Pagination ────────────────────────────────────────────────────────────
+    st.markdown('<div style="height:12px"></div>', unsafe_allow_html=True)
+    if n_pages > 1:
+        pg1, pg2, pg3 = st.columns([2, 3, 2], gap="small")
+        with pg1:
+            if st.button("← Previous", disabled=(cur_page == 0), key="cv_prev"):
+                st.session_state.cv_page = cur_page - 1
+                st.rerun()
+        with pg2:
+            st.markdown(
+                f'<div style="text-align:center;font-size:12px;color:var(--muted);padding-top:10px;font-family:\'JetBrains Mono\',monospace">'
+                f'Page {cur_page+1} / {n_pages}  ·  {n_filtered:,} results</div>',
+                unsafe_allow_html=True,
+            )
+        with pg3:
+            if st.button("Next →", disabled=(cur_page >= n_pages - 1), key="cv_next"):
+                st.session_state.cv_page = cur_page + 1
+                st.rerun()

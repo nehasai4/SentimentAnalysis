@@ -88,9 +88,14 @@ TAXONOMY: dict[str, dict[str, list[str]]] = {
             "heart rate", "steps", "apple watch", "fitbit", "mi band",
         ],
         "Accessories": [
-            "charger", "cable", "usb", "adapter", "case", "cover",
-            "screen guard", "tempered glass", "power bank", "hub",
-            "dongle", "mouse", "keyboard", "webcam",
+            "charger", "charging cable", "usb cable", "adapter", "phone case", "phone cover",
+            "screen guard", "tempered glass", "power bank", "usb hub",
+            "dongle", "wireless mouse", "mechanical keyboard", "webcam", "laptop bag",
+            "wifi adapter", "wifi dongle", "usb wifi", "network adapter", "ethernet",
+            "router", "modem", "signal", "wireless adapter", "bluetooth adapter",
+            "cable", "data cable", "type c", "lightning cable", "micro usb",
+            "car charger", "fast charging", "quick charge", "original cable",
+            "spare cable", "durable cable", "charging speed", "wired",
         ],
     },
 
@@ -186,8 +191,9 @@ TAXONOMY: dict[str, dict[str, list[str]]] = {
     # ── 5. Beauty & Personal Care ─────────────────────────────────────────────
     "Beauty": {
         "Skincare": [
-            "moisturizer", "sunscreen", "serum", "face wash", "toner",
-            "cream", "skin", "acne", "glow", "hydrating", "spf",
+            "moisturizer", "sunscreen", "face serum", "face wash", "toner",
+            "skin cream", "acne treatment", "skin glow", "hydrating cream", "spf",
+            "skincare", "skin care routine",
         ],
         "Haircare": [
             "shampoo", "conditioner", "hair oil", "hair mask", "dandruff",
@@ -234,40 +240,49 @@ TAXONOMY: dict[str, dict[str, list[str]]] = {
     # ── 7. Automotive ─────────────────────────────────────────────────────────
     "Automotive": {
         "Cars": [
-            "car", "sedan", "suv", "hatchback", "electric car", "ev",
+            "sedan", "suv", "hatchback", "electric car", "ev",
             "maruti", "hyundai", "tata", "honda", "toyota",
+            "car engine", "car insurance", "car loan", "car battery",
+            "driving", "dashboard", "steering", "gear", "windshield",
+            "fuel efficiency", "mileage", "test drive", "car model",
+            "car service", "car paint", "car door", "car seat",
         ],
         "Bikes": [
-            "bike", "motorcycle", "scooter", "bicycle", "cycle",
-            "bajaj", "hero", "royal enfield", "yamaha",
+            "motorcycle", "scooter", "bicycle", "cycle",
+            "bajaj", "hero motocorp", "royal enfield", "yamaha bike",
+            "two wheeler", "motorbike", "bike engine", "bike helmet",
+            "activa", "pulsar", "splendor", "ktm", "dirt bike",
         ],
         "Accessories": [
-            "helmet", "seat cover", "car cover", "dash cam", "gps",
-            "car charger", "wiper", "tyres", "rim",
+            "helmet", "seat cover", "car cover", "dash cam", "gps tracker",
+            "wiper blade", "tyres", "rim", "alloy wheel", "car mat",
+            "parking sensor", "reverse camera", "car audio system",
+            "car air freshener", "steering cover", "car vacuum cleaner",
         ],
         "Services": [
-            "service center", "oil change", "repair", "mechanic",
-            "car wash", "roadside",
+            "service center", "oil change", "repair shop", "mechanic",
+            "vehicle service", "roadside assistance", "car wash", "vehicle repair",
+            "auto service", "tyre puncture", "engine repair",
         ],
     },
 
     # ── 8. Books & Media ──────────────────────────────────────────────────────
     "Books & Media": {
         "Books": [
-            "book", "novel", "author", "chapter", "pages", "read",
-            "fiction", "non-fiction", "hardcover", "paperback",
+            "book", "novel", "author", "chapter", "fiction", "non-fiction",
+            "hardcover", "paperback", "bookshelf", "bestseller",
         ],
         "Audiobooks": [
-            "audiobook", "audible", "narrator", "listen",
+            "audiobook", "audible", "narrator",
         ],
         "E-books": [
-            "ebook", "kindle", "digital book", "pdf book",
+            "ebook", "kindle book", "digital book", "pdf book",
         ],
         "Comics": [
-            "comic", "manga", "graphic novel", "superhero",
+            "comic book", "manga", "graphic novel", "superhero comic",
         ],
         "Magazines": [
-            "magazine", "journal", "publication", "issue", "editorial",
+            "magazine", "periodical", "monthly publication", "editorial", "subscriber",
         ],
     },
 
@@ -300,17 +315,17 @@ TAXONOMY: dict[str, dict[str, list[str]]] = {
     # ── 10. Music ─────────────────────────────────────────────────────────────
     "Music": {
         "Streaming": [
-            "spotify", "gaana", "jiosaavn", "apple music", "music app",
+            "spotify", "gaana", "jiosaavn", "apple music", "music app", "music streaming",
         ],
         "Instruments": [
-            "guitar", "piano", "keyboard", "violin", "drums", "sitar",
-            "tabla", "instrument",
+            "guitar", "piano", "keyboard instrument", "violin", "drums", "sitar",
+            "tabla", "musical instrument",
         ],
         "Concert": [
-            "concert", "live music", "gig", "festival", "show",
+            "concert", "live music", "gig", "music festival", "live performance",
         ],
         "Album": [
-            "album", "track", "song", "lyrics", "playlist", "artist", "band",
+            "album", "music track", "song lyrics", "music playlist", "recording artist", "music band",
         ],
     },
 
@@ -353,11 +368,11 @@ TAXONOMY: dict[str, dict[str, list[str]]] = {
             "itinerary", "sightseeing",
         ],
         "Car Rental": [
-            "cab", "taxi", "ola", "uber", "car rental", "driver",
-            "ride", "auto",
+            "cab", "taxi", "ola", "uber", "car rental", "cab driver",
+            "ride share", "auto rickshaw",
         ],
         "Cruise": [
-            "cruise", "ship", "deck", "port", "sail",
+            "cruise ship", "cruise line", "cruise deck", "ocean liner", "sail",
         ],
     },
 
