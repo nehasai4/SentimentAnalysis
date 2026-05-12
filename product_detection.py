@@ -82,6 +82,9 @@ TAXONOMY: dict[str, dict[str, list[str]]] = {
             "tv", "television", "smart tv", "oled", "qled", "led tv",
             "display", "monitor", "screen", "4k", "resolution", "hdmi",
             "samsung tv", "lg", "sony tv",
+            "remote", "remote control", "tv remote", "set top box", "tata sky",
+            "tatasky", "dth", "dish tv", "d2h", "airtel dth", "jio fiber",
+            "ac remote", "air conditioner remote", "universal remote",
         ],
         "Wearable": [
             "smartwatch", "watch", "fitness band", "tracker", "wearable",
@@ -169,6 +172,10 @@ TAXONOMY: dict[str, dict[str, list[str]]] = {
         "Kitchen": [
             "mixer", "grinder", "pressure cooker", "induction", "microwave",
             "air fryer", "oven", "utensil", "cookware", "pan", "kadai",
+            "air conditioner", "air conditioner remote", "ac remote", "ac unit",
+            "split ac", "window ac", "inverter ac", "ac cooling", "cooling",
+            "refrigerator", "fridge", "washing machine", "dishwasher",
+            "water purifier", "ro", "water heater", "geyser",
         ],
         "Bedding": [
             "bedsheet", "pillow", "blanket", "quilt", "mattress", "cushion",
@@ -241,17 +248,22 @@ TAXONOMY: dict[str, dict[str, list[str]]] = {
     "Automotive": {
         "Cars": [
             "sedan", "suv", "hatchback", "electric car", "ev",
-            "maruti", "hyundai", "tata", "honda", "toyota",
+            "maruti", "hyundai", "tata car", "tata motors", "tata vehicle",
+            "honda car", "toyota car",
             "car engine", "car insurance", "car loan", "car battery",
             "driving", "dashboard", "steering", "gear", "windshield",
             "fuel efficiency", "mileage", "test drive", "car model",
             "car service", "car paint", "car door", "car seat",
+            "four wheeler", "hatchback", "mpv", "minivan",
         ],
         "Bikes": [
-            "motorcycle", "scooter", "bicycle", "cycle",
+            "motorcycle", "two wheeler", "motorbike",
+            "bicycle", "cycle",
             "bajaj", "hero motocorp", "royal enfield", "yamaha bike",
-            "two wheeler", "motorbike", "bike engine", "bike helmet",
-            "activa", "pulsar", "splendor", "ktm", "dirt bike",
+            "honda activa", "activa scooter", "electric scooter", "e-scooter",
+            "pulsar", "splendor", "ktm", "dirt bike",
+            "bike engine", "bike helmet", "bike service", "bike tyre",
+            "two-wheeler", "gearless scooter", "moped",
         ],
         "Accessories": [
             "helmet", "seat cover", "car cover", "dash cam", "gps tracker",
