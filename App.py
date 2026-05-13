@@ -17,6 +17,12 @@ import requests
 import pandas as pd
 import time
 
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+API_BASE = os.environ.get("API_BASE", "http://localhost:8000")
+
 st.set_page_config(
     page_title="Sentiment AI",
     page_icon="◈",
@@ -24,7 +30,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-API_BASE = "https://sentimentanalysis-s16d.onrender.com"
+
 
 # ── session state defaults ─────────────────────────────────────────────────────
 for _k, _v in [
@@ -271,9 +277,61 @@ def fmt_time(s):
     if s < 60:   return f"{s}s"
     if s < 3600: return f"{s//60}m {s%60}s"
     return f"{s//3600}h {(s%3600)//60}m"
-def backend_ok():
-    try: return requests.get(f"{API_BASE}/", timeout=3).status_code == 200
-    except: return False
+def backend_status() -> str:
+    """
+    Returns one of three states:
+      'online'   — /health returned 200
+      'warming'  — connection refused / timeout (Render cold-start in progress)
+      'offline'  — unexpected HTTP error
+    Hitting /health (not /) means the check is instant — no model inference.
+    """
+    try:
+        r = requests.get(f"{API_BASE}/health", timeout=5)
+        return "online" if r.status_code == 200 else "offline"
+    except requests.exceptions.ConnectionError:
+        return "warming"
+    except requests.exceptions.Timeout:
+        return "warming"
+    except Exception:
+        return "offline"
+
+def backend_ok() -> bool:
+    """Backward-compat shim used by page guards below."""
+    return backend_status() == "online"
+
+def wait_for_backend(placeholder, max_wait: int = 90) -> bool:
+    """
+    Poll /health every 3 s for up to max_wait seconds.
+    Renders a progress bar + message inside `placeholder`.
+    Returns True when online, False if it never woke up.
+    """
+    start = time.time()
+    dots  = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+    i     = 0
+    while time.time() - start < max_wait:
+        elapsed = int(time.time() - start)
+        pct     = min(elapsed / max_wait, 0.95)
+        placeholder.markdown(f"""
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:28px 32px;max-width:520px;margin:40px auto">
+          <div style="font-size:22px;margin-bottom:14px">{dots[i % len(dots)]}</div>
+          <div style="font-family:'DM Serif Display',serif;font-size:20px;margin-bottom:8px">Backend warming up…</div>
+          <div style="font-size:13px;color:var(--muted);margin-bottom:18px;line-height:1.6">
+            Render spins down free instances after 15 min of inactivity.<br>
+            Models are loading — usually ready in 30–60 s.
+          </div>
+          <div style="height:6px;background:rgba(12,12,14,.08);border-radius:100px;overflow:hidden;margin-bottom:10px">
+            <div style="width:{int(pct*100)}%;height:100%;background:linear-gradient(90deg,var(--teal),#1cbfac);border-radius:100px;transition:width .4s ease"></div>
+          </div>
+          <div style="font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace">{elapsed}s elapsed · polling /health every 3s</div>
+        </div>
+        """, unsafe_allow_html=True)
+        time.sleep(3)
+        i += 1
+        if backend_status() == "online":
+            placeholder.empty()
+            return True
+    placeholder.empty()
+    return False
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -291,19 +349,44 @@ with st.sidebar:
     st.session_state.page = page_map[sel]
 
     st.markdown('<div style="height:1px;background:rgba(255,255,255,.08);margin:18px 0"></div>', unsafe_allow_html=True)
-    ok = backend_ok()
-    bc = "rgba(15,124,110,.9)" if ok else "rgba(184,51,72,.9)"
-    bg = "rgba(15,124,110,.1)" if ok else "rgba(184,51,72,.1)"
-    bd = "rgba(15,124,110,.2)" if ok else "rgba(184,51,72,.2)"
+    _status = backend_status()
+    if _status == "online":
+        bc, bg, bd, _label = ("rgba(15,124,110,.9)", "rgba(15,124,110,.1)", "rgba(15,124,110,.2)", "Backend online")
+    elif _status == "warming":
+        bc, bg, bd, _label = ("rgba(196,123,10,.9)",  "rgba(196,123,10,.1)",  "rgba(196,123,10,.2)",  "Warming up…")
+    else:
+        bc, bg, bd, _label = ("rgba(184,51,72,.9)",   "rgba(184,51,72,.1)",   "rgba(184,51,72,.2)",   "Backend offline")
     st.markdown(f"""
     <div style="display:flex;align-items:center;gap:8px;font-size:11px;color:{bc};background:{bg};border:1px solid {bd};border-radius:8px;padding:8px 12px">
       <div style="width:6px;height:6px;border-radius:50%;background:{bc};flex-shrink:0"></div>
-      {"Backend online" if ok else "Backend offline"}
+      {_label}
     </div>
     <div style="margin-top:8px;font-size:10px;color:rgba(255,255,255,.28);font-family:'JetBrains Mono',monospace">{API_BASE}</div>
     """, unsafe_allow_html=True)
 
 page = st.session_state.page
+
+# ── WARM-UP GATE ──────────────────────────────────────────────────────────────
+# Pages that need the backend: everything except Home (which is static).
+# On first visit, if the backend is still cold-starting on Render, we show a
+# progress spinner and poll /health until it wakes up (or we give up after 90s).
+_NEEDS_BACKEND = {"Text Analysis", "Batch Upload", "Dashboard", "Product Deep Dive", "Customer View"}
+
+if page in _NEEDS_BACKEND:
+    _s = backend_status()
+    if _s != "online":
+        _warmup_ph = st.empty()
+        if _s == "warming":
+            _ready = wait_for_backend(_warmup_ph, max_wait=90)
+        else:
+            # Hard offline (bad HTTP status) — show a clear error, don't spin.
+            _ready = False
+            _warmup_ph.error(
+                f"Backend is unreachable at `{API_BASE}`. "
+                "Check your Render dashboard or try again in a moment."
+            )
+        if not _ready:
+            st.stop()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HOME

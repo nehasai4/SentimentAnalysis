@@ -1,18 +1,21 @@
 """
-main.py — Review Analyzer API v5.0
+main.py — Review Analyzer API v6.0
 ────────────────────────────────────────────────────────────────────────────────
-Fixes vs v4:
-  ─ /analyze_text now returns fake_reasons list for frontend explainability
-  ─ confidence stored as 0.0–1.0 throughout (never pre-multiplied)
-  ─ fake_score stored as 0.0–1.0 throughout
-  ─ version bumped to 5.0.0
-  ─ ABSA endpoint added (/absa) for single-text aspect analysis
-  ─ insights fallback threshold lowered to 10% fake (matches frontend alert)
+New in v6:
+  ─ Rate limiting via slowapi (10 req/min on /analyze_text, 2 req/min on /upload_csv)
+  ─ CORS locked to ALLOWED_ORIGIN env-var (defaults to * for local dev)
+  ─ /health warmup endpoint — lightweight, no model calls, returns 200 fast
+    so the Streamlit frontend can poll during Render cold-start instead of
+    showing "Backend offline"
 """
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import pandas as pd
 import threading
 import concurrent.futures
@@ -29,7 +32,7 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_DATASETS_OFFLINE"] = "1"
 
 from sentiment_model import predict_sentiment, predict_sentiment_batch
-from product_detection import detect_product, detect_product_with_sub
+from product_detection import detect_product
 from fake_review import detect_fake, detect_fake_explained
 from Duplicatedetection import detect_duplicates
 
@@ -45,15 +48,32 @@ class TextRequest(BaseModel):
         str_min_length = 1
 
 
+# ── RATE LIMITER ──────────────────────────────────────────────────────────────
+# Uses the client IP address as the key.  Limits:
+#   /analyze_text  — 10 requests / minute  (single-review endpoint)
+#   /upload_csv    — 2  requests / minute  (heavy batch endpoint)
+# Override per-route with @limiter.limit("N/minute") decorator.
+
+limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+
+
 # ── APP + CORS ────────────────────────────────────────────────────────────────
+# Lock CORS to your Vercel domain in production by setting the env-var:
+#   ALLOWED_ORIGIN=https://your-app.vercel.app
+# Leave it unset (or set to *) for local development.
 
+_ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "*")
 
-app = FastAPI(title="Review Analyzer API", version="5.0.0")
+app = FastAPI(title="Review Analyzer API", version="6.0.0")
+
+# Attach the rate-limiter and its 429 error handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[_ALLOWED_ORIGIN] if _ALLOWED_ORIGIN != "*" else ["*"],
+    allow_credentials=_ALLOWED_ORIGIN != "*",   # credentials need an explicit origin
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -127,8 +147,8 @@ def _safe_unpack(value: Any, fallback_label: str, fallback_score: float = 0.0) -
 
 
 def _detect_product_batch(texts: list[str]) -> list[tuple]:
-    """Run detect_product_with_sub over a list and return list of (category, sub_category) tuples."""
-    return [detect_product_with_sub(t) for t in texts]
+    """Run detect_product over a list and return list of (label, score) tuples."""
+    return [_safe_unpack(detect_product(t), "General", 0) for t in texts]
 
 
 def _detect_fake_batch(texts: list[str]) -> list[tuple]:
@@ -189,21 +209,20 @@ def _analyse_single(text: str) -> dict:
     """
     sentiment, sent_score = _safe_unpack(predict_sentiment(text), "Neutral", 0.0)
     emotion               = "Neutral"   # Emotion model disabled
-    product, sub_category = detect_product_with_sub(text)
+    product, _            = _safe_unpack(detect_product(text), "General", 0)
 
     # Use the explained variant so the UI gets the reasons list
     fake_label, fake_score, fake_reasons = detect_fake_explained(text)
 
     return {
-        "review":        text,
-        "sentiment":     sentiment,
-        "emotion":       emotion,
-        "product":       product,
-        "sub_category":  sub_category,
-        "fake_review":   fake_label,
-        "confidence":    round(float(sent_score), 4),   # 0.0–1.0
-        "fake_score":    round(float(fake_score), 4),   # 0.0–1.0
-        "fake_reasons":  fake_reasons,                  # list[dict] for UI
+        "review":       text,
+        "sentiment":    sentiment,
+        "emotion":      emotion,
+        "product":      product,
+        "fake_review":  fake_label,
+        "confidence":   round(float(sent_score), 4),   # 0.0–1.0
+        "fake_score":   round(float(fake_score), 4),   # 0.0–1.0
+        "fake_reasons": fake_reasons,                  # list[dict] for UI
     }
 
 
@@ -226,14 +245,36 @@ def _build_error_row(review: str) -> dict:
 def home():
     return {
         "message":    "Review Analyzer API is running",
-        "version":    "5.0.0",
+        "version":    "6.0.0",
         "device":     "GPU" if torch.cuda.is_available() else "CPU",
         "batch_size": BATCH_SIZE,
         "cpu_cores":  os.cpu_count(),
         "endpoints":  [
-            "/analyze_text", "/upload_csv", "/progress",
+            "/health", "/analyze_text", "/upload_csv", "/progress",
             "/results", "/insights", "/duplicates", "/absa", "/debug",
         ],
+    }
+
+
+# ── HEALTH / WARMUP ───────────────────────────────────────────────────────────
+
+
+@app.get("/health")
+def health():
+    """
+    Lightweight warmup endpoint — returns 200 immediately with no model calls.
+
+    The Streamlit frontend polls this on load so it can show a "Warming up…"
+    spinner instead of "Backend offline" during Render cold-starts (which can
+    take 30–60 s while PyTorch models are loaded).
+
+    Render free-tier instances sleep after 15 min of inactivity.  Hitting
+    /health is cheap and wakes the instance before the user hits a real endpoint.
+    """
+    return {
+        "status":  "ok",
+        "version": "6.0.0",
+        "device":  "GPU" if torch.cuda.is_available() else "CPU",
     }
 
 
@@ -241,14 +282,15 @@ def home():
 
 
 @app.post("/analyze_text")
-async def analyze_text(request: TextRequest):
+@limiter.limit("10/minute")
+async def analyze_text(request: Request, req: TextRequest):
     """
     Analyse a single review text.
     Returns sentiment, emotion, product, fake label + score + reasons, confidence.
     All scores are 0.0–1.0 fractions — the frontend multiplies by 100 for display.
     """
     try:
-        result = _analyse_single(request.text)
+        result = _analyse_single(req.text)
         return result
     except Exception as e:
         import traceback
@@ -260,7 +302,8 @@ async def analyze_text(request: TextRequest):
 
 
 @app.post("/absa")
-async def absa_single(request: TextRequest):
+@limiter.limit("10/minute")
+async def absa_single(request: Request, req: TextRequest):
     """
     Run Aspect-Based Sentiment Analysis on a single review.
     Returns a list of aspect dicts:
@@ -269,7 +312,7 @@ async def absa_single(request: TextRequest):
     """
     try:
         from Absamodel import analyse_aspects
-        aspects = analyse_aspects(request.text)
+        aspects = analyse_aspects(req.text)
         return {"aspects": aspects}
     except Exception as e:
         import traceback
@@ -281,7 +324,9 @@ async def absa_single(request: TextRequest):
 
 
 @app.post("/upload_csv")
+@limiter.limit("2/minute")
 async def upload_csv(
+    request: Request,
     file:   UploadFile = File(...),
     column: str        = Form(...)
 ):
@@ -398,20 +443,19 @@ def _process_batch(reviews: list[str]) -> None:
             batch_results = []
             for j, review in enumerate(batch):
                 try:
-                    product, sub_category = products[j]   # now a (cat, sub) tuple
+                    product,   _          = products[j]
                     fake,      fake_score = fakes[j]
                     sentiment, sent_score = _safe_unpack(raw_sentiments[j], "Neutral", 0.0)
                     emotion               = raw_emotions[j]
 
                     batch_results.append({
-                        "review":       review,
-                        "sentiment":    sentiment,
-                        "emotion":      emotion,
-                        "product":      product,
-                        "sub_category": sub_category,
-                        "fake_review":  fake,
-                        "confidence":   round(float(sent_score), 4),  # 0.0–1.0
-                        "fake_score":   round(float(fake_score), 4),  # 0.0–1.0
+                        "review":      review,
+                        "sentiment":   sentiment,
+                        "emotion":     emotion,
+                        "product":     product,
+                        "fake_review": fake,
+                        "confidence":  round(float(sent_score), 4),  # 0.0–1.0
+                        "fake_score":  round(float(fake_score), 4),  # 0.0–1.0
                     })
 
                 except Exception as e:

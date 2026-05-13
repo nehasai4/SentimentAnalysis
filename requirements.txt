@@ -17,3 +17,4 @@ psutil
 httpx
 scikit-learn
 accelerate
+python-dotenv
