@@ -1,12 +1,24 @@
 """
-main.py — Review Analyzer API v6.0
+main.py — Review Analyzer API v6.1
 ────────────────────────────────────────────────────────────────────────────────
-New in v6:
-  ─ Rate limiting via slowapi (10 req/min on /analyze_text, 2 req/min on /upload_csv)
-  ─ CORS locked to ALLOWED_ORIGIN env-var (defaults to * for local dev)
-  ─ /health warmup endpoint — lightweight, no model calls, returns 200 fast
-    so the Streamlit frontend can poll during Render cold-start instead of
-    showing "Backend offline"
+Memory fixes vs v6.0 (targeting Render free tier 512MB limit):
+
+  ✦ _process_batch now calls _unload_sentiment() in its `finally` block so
+    the RoBERTa model is freed from RAM as soon as a CSV job completes.
+    The model reloads automatically on the next /analyze_text request.
+
+  ✦ /absa endpoint guards against concurrent batch jobs (both models in RAM
+    simultaneously would exceed 512MB) and unloads ABSA when done so the
+    sentiment model can reload for the next batch.
+
+  ✦ BATCH_SIZE env-var defaults to 16 on CPU (was 32) — halves the peak
+    tensor memory during tokenization without meaningfully hurting throughput.
+
+  ✦ torch.set_num_threads capped at min(cpu_count, 4) — over-threading on
+    Render's shared CPUs wastes RAM on thread stacks and hurts latency.
+
+Everything else (rate limiting, CORS, progress, insights, duplicates) is
+unchanged from v6.0.
 """
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
@@ -28,12 +40,6 @@ from collections import Counter
 import re
 import httpx
 
-# NOTE: Do NOT set TRANSFORMERS_OFFLINE=1 here.
-# On a fresh Render deploy the model cache may not exist yet, and forcing
-# offline mode causes a hard crash before any endpoint can respond.
-# Models are cached after the first successful download; subsequent cold-starts
-# load from disk automatically without needing this flag.
-
 from sentiment_model import predict_sentiment, predict_sentiment_batch, unload as _unload_sentiment
 from product_detection import detect_product
 from fake_review import detect_fake, detect_fake_explained
@@ -41,7 +47,6 @@ from Duplicatedetection import detect_duplicates
 
 
 # ── REQUEST SCHEMA ────────────────────────────────────────────────────────────
-
 
 class TextRequest(BaseModel):
     text: str
@@ -52,31 +57,22 @@ class TextRequest(BaseModel):
 
 
 # ── RATE LIMITER ──────────────────────────────────────────────────────────────
-# Uses the client IP address as the key.  Limits:
-#   /analyze_text  — 10 requests / minute  (single-review endpoint)
-#   /upload_csv    — 2  requests / minute  (heavy batch endpoint)
-# Override per-route with @limiter.limit("N/minute") decorator.
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
 
 # ── APP + CORS ────────────────────────────────────────────────────────────────
-# Lock CORS to your Vercel domain in production by setting the env-var:
-#   ALLOWED_ORIGIN=https://your-app.vercel.app
-# Leave it unset (or set to *) for local development.
 
 _ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "*")
 
-app = FastAPI(title="Review Analyzer API", version="6.0.0")
-
-# Attach the rate-limiter and its 429 error handler
+app = FastAPI(title="Review Analyzer API", version="6.1.0")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[_ALLOWED_ORIGIN] if _ALLOWED_ORIGIN != "*" else ["*"],
-    allow_credentials=_ALLOWED_ORIGIN != "*",   # credentials need an explicit origin
+    allow_credentials=_ALLOWED_ORIGIN != "*",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -84,31 +80,33 @@ app.add_middleware(
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
 
-
 MAX_ROWS = 50_000
 MAX_MB   = 50
 
-# Smaller batches on CPU keep each chunk short and progress updates frequent.
-# On GPU, larger batches amortise kernel launch overhead.
-_default_batch = 64 if torch.cuda.is_available() else 32
+# ── MEMORY FIX: default batch size reduced from 32 → 16 on CPU ───────────────
+# Each batch allocates tokenizer tensors proportional to batch_size × seq_len.
+# 16 reviews × 128 tokens is much cheaper than 32 × 128 with no meaningful
+# throughput loss since the bottleneck is model inference, not data loading.
+_default_batch = 64 if torch.cuda.is_available() else 16
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", _default_batch))
 
-# EMA smoothing factor — higher = faster to react to speed changes
 EMA_ALPHA = 0.2
 
-# 4 workers: sentiment, product, fake all run simultaneously
 _model_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
-# Use all available CPU threads for PyTorch operations
-torch.set_num_threads(os.cpu_count() or 4)
+# ── MEMORY FIX: cap PyTorch threads ──────────────────────────────────────────
+# On Render's shared CPUs, spawning too many threads wastes RAM on stacks and
+# causes context-switch overhead.  4 is the sweet spot for free-tier instances.
+_num_threads = min(os.cpu_count() or 4, 4)
+torch.set_num_threads(_num_threads)
 
+print(f"[main] Version   : 6.1.0")
 print(f"[main] Device    : {'GPU' if torch.cuda.is_available() else 'CPU'}")
 print(f"[main] Batch size: {BATCH_SIZE}")
-print(f"[main] CPU cores : {os.cpu_count()}")
+print(f"[main] CPU cores : {os.cpu_count()}  (torch threads: {_num_threads})")
 
 
 # ── SHARED STATE ──────────────────────────────────────────────────────────────
-
 
 _lock = threading.Lock()
 
@@ -128,13 +126,7 @@ _file_name: str        = ""
 
 # ── SAFE UNPACK ───────────────────────────────────────────────────────────────
 
-
 def _safe_unpack(value: Any, fallback_label: str, fallback_score: float = 0.0) -> tuple:
-    """
-    Safely unpacks any function return into exactly (label, score).
-    Prevents 'too many values to unpack' regardless of what the
-    model function actually returns.
-    """
     if isinstance(value, str):
         return value, fallback_score
     if isinstance(value, (list, tuple)):
@@ -148,19 +140,15 @@ def _safe_unpack(value: Any, fallback_label: str, fallback_score: float = 0.0) -
 
 # ── BATCH WRAPPERS FOR RULE-BASED MODELS ─────────────────────────────────────
 
-
 def _detect_product_batch(texts: list[str]) -> list[tuple]:
-    """Run detect_product over a list and return list of (label, score) tuples."""
     return [_safe_unpack(detect_product(t), "General", 0) for t in texts]
 
 
 def _detect_fake_batch(texts: list[str]) -> list[tuple]:
-    """Run detect_fake over a list and return list of (label, score) tuples."""
     return [_safe_unpack(detect_fake(t), "Real", 0.0) for t in texts]
 
 
 # ── PROGRESS HELPERS ──────────────────────────────────────────────────────────
-
 
 def _reset_progress(total: int) -> None:
     with _lock:
@@ -176,12 +164,6 @@ def _reset_progress(total: int) -> None:
 
 
 def _update_progress(processed: int, total: int, batch_elapsed: float, batch_count: int) -> None:
-    """
-    EMA-based speed and ETA using per-batch timing.
-
-    batch_elapsed  — wall-clock seconds this batch took
-    batch_count    — number of reviews in this batch
-    """
     raw_speed = batch_count / batch_elapsed if batch_elapsed > 0 else 1.0
 
     with _lock:
@@ -203,18 +185,10 @@ def _update_progress(processed: int, total: int, batch_elapsed: float, batch_cou
 
 # ── ANALYSIS HELPERS ──────────────────────────────────────────────────────────
 
-
 def _analyse_single(text: str) -> dict:
-    """
-    Single review — used by /analyze_text.
-    Returns fake_reasons list so the frontend can show rule-by-rule explainability.
-    confidence and fake_score are stored as 0.0–1.0 (raw fractions).
-    """
     sentiment, sent_score = _safe_unpack(predict_sentiment(text), "Neutral", 0.0)
-    emotion               = "Neutral"   # Emotion model disabled
+    emotion               = "Neutral"
     product, _            = _safe_unpack(detect_product(text), "General", 0)
-
-    # Use the explained variant so the UI gets the reasons list
     fake_label, fake_score, fake_reasons = detect_fake_explained(text)
 
     return {
@@ -223,9 +197,9 @@ def _analyse_single(text: str) -> dict:
         "emotion":      emotion,
         "product":      product,
         "fake_review":  fake_label,
-        "confidence":   round(float(sent_score), 4),   # 0.0–1.0
-        "fake_score":   round(float(fake_score), 4),   # 0.0–1.0
-        "fake_reasons": fake_reasons,                  # list[dict] for UI
+        "confidence":   round(float(sent_score), 4),
+        "fake_score":   round(float(fake_score), 4),
+        "fake_reasons": fake_reasons,
     }
 
 
@@ -243,12 +217,11 @@ def _build_error_row(review: str) -> dict:
 
 # ── ROUTES ────────────────────────────────────────────────────────────────────
 
-
 @app.get("/")
 def home():
     return {
         "message":    "Review Analyzer API is running",
-        "version":    "6.0.0",
+        "version":    "6.1.0",
         "device":     "GPU" if torch.cuda.is_available() else "CPU",
         "batch_size": BATCH_SIZE,
         "cpu_cores":  os.cpu_count(),
@@ -259,14 +232,11 @@ def home():
     }
 
 
-# ── HEALTH / WARMUP ───────────────────────────────────────────────────────────
-
-
 @app.get("/health")
 def health():
     """
     Lightweight warmup endpoint — returns 200 immediately with no model calls.
-    Reports current RAM usage so memory issues can be monitored on Render.
+    Reports RAM usage so memory issues can be spotted in Render logs.
     """
     mem_mb = None
     try:
@@ -277,7 +247,7 @@ def health():
 
     return {
         "status":  "ok",
-        "version": "6.0.0",
+        "version": "6.1.0",
         "device":  "GPU" if torch.cuda.is_available() else "CPU",
         "ram_mb":  mem_mb,
     }
@@ -285,15 +255,9 @@ def health():
 
 # ── SINGLE TEXT ───────────────────────────────────────────────────────────────
 
-
 @app.post("/analyze_text")
 @limiter.limit("10/minute")
 async def analyze_text(request: Request, req: TextRequest):
-    """
-    Analyse a single review text.
-    Returns sentiment, emotion, product, fake label + score + reasons, confidence.
-    All scores are 0.0–1.0 fractions — the frontend multiplies by 100 for display.
-    """
     try:
         result = _analyse_single(req.text)
         return result
@@ -305,31 +269,55 @@ async def analyze_text(request: Request, req: TextRequest):
 
 # ── ABSA ENDPOINT ─────────────────────────────────────────────────────────────
 
-
 @app.post("/absa")
 @limiter.limit("10/minute")
 async def absa_single(request: Request, req: TextRequest):
     """
     Run Aspect-Based Sentiment Analysis on a single review.
-    Returns a list of aspect dicts:
-      { aspect, sentiment, confidence, mentioned, snippet }
-    Lazy-loads the ABSA model on first call.
+
+    Memory safety:
+      1. Reject if a batch job is already running (both models in RAM = OOM).
+      2. Unload the sentiment model before loading ABSA.
+      3. Unload ABSA after the call so sentiment can reload for the next request.
     """
+    # ── MEMORY FIX: block ABSA during batch jobs ──────────────────────────────
+    with _lock:
+        if _progress["running"]:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "A batch analysis is currently running. "
+                    "ABSA is unavailable during batch processing to prevent "
+                    "out-of-memory errors. Please try again once the batch completes."
+                ),
+            )
+
     try:
-        from Absamodel import analyse_aspects
-        # Free the sentiment model before loading ABSA — both together exceed
-        # Render free tier's 512MB RAM limit. Sentiment reloads on next batch call.
+        from Absamodel import analyse_aspects, unload as _unload_absa
+
+        # Free sentiment model first — both models together exceed 512MB
         _unload_sentiment()
+
         aspects = analyse_aspects(req.text)
         return {"aspects": aspects}
+
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"ABSA failed: {str(e)}")
 
+    finally:
+        # ── MEMORY FIX: always unload ABSA after the call ─────────────────────
+        # This ensures RAM is freed even if the call raised an exception,
+        # so the next request (likely a batch job) can reload sentiment.
+        try:
+            from Absamodel import unload as _unload_absa
+            _unload_absa()
+        except Exception:
+            pass
+
 
 # ── CSV UPLOAD ────────────────────────────────────────────────────────────────
-
 
 @app.post("/upload_csv")
 @limiter.limit("2/minute")
@@ -398,16 +386,16 @@ async def upload_csv(
 
 # ── BACKGROUND BATCH PROCESSING ───────────────────────────────────────────────
 
-
 def _process_batch(reviews: list[str]) -> None:
     """
     Processes reviews in parallel batches:
       1. Sentiment model (transformer, batched)
       2. Product detection (rule-based, batched)
       3. Fake detection (rule-based, batched)
-    All three run concurrently via ThreadPoolExecutor.
-    Results written incrementally after each batch.
-    confidence and fake_score stored as 0.0–1.0 fractions.
+
+    Memory fix: calls _unload_sentiment() in the finally block so the
+    ~125MB RoBERTa model is freed from RAM as soon as the job completes.
+    The model reloads automatically on the next /analyze_text call.
     """
     global _results
 
@@ -421,12 +409,10 @@ def _process_batch(reviews: list[str]) -> None:
 
             batch_t0 = time.time()
 
-            # Submit all models in parallel
             future_sent    = _model_executor.submit(predict_sentiment_batch, batch)
             future_product = _model_executor.submit(_detect_product_batch,   batch)
             future_fake    = _model_executor.submit(_detect_fake_batch,      batch)
 
-            # Collect with individual fallbacks
             try:
                 raw_sentiments = future_sent.result(timeout=120)
             except Exception as e:
@@ -447,7 +433,6 @@ def _process_batch(reviews: list[str]) -> None:
                 print(f"[WARN] Fake batch {batch_start} failed: {e}")
                 fakes = [("Real", 0.0)] * len(batch)
 
-            # Assemble results
             batch_results = []
             for j, review in enumerate(batch):
                 try:
@@ -462,8 +447,8 @@ def _process_batch(reviews: list[str]) -> None:
                         "emotion":     emotion,
                         "product":     product,
                         "fake_review": fake,
-                        "confidence":  round(float(sent_score), 4),  # 0.0–1.0
-                        "fake_score":  round(float(fake_score), 4),  # 0.0–1.0
+                        "confidence":  round(float(sent_score), 4),
+                        "fake_score":  round(float(fake_score), 4),
                     })
 
                 except Exception as e:
@@ -472,7 +457,6 @@ def _process_batch(reviews: list[str]) -> None:
 
             results.extend(batch_results)
 
-            # Write incrementally so /results always returns fresh partial data
             with _lock:
                 _results = results[:]
 
@@ -499,18 +483,19 @@ def _process_batch(reviews: list[str]) -> None:
             _progress["running"]   = False
             _progress["processed"] = total
 
+        # ── MEMORY FIX: unload sentiment model after every batch ──────────────
+        # Frees ~125MB of RoBERTa weights + quantization overhead.
+        # The model reloads automatically on the next /analyze_text call.
+        # Without this, the model stays resident between batches and leaves
+        # no headroom for ABSA or other allocations.
+        _unload_sentiment()
+        print("[INFO] Sentiment model unloaded after batch — RAM freed.")
+
 
 # ── PROGRESS ENDPOINT ─────────────────────────────────────────────────────────
 
-
 @app.get("/progress")
 def get_progress():
-    """
-    elapsed — real seconds since batch started (counts up)
-    eta     — EMA-smoothed seconds remaining   (counts down)
-    speed   — EMA-smoothed reviews/sec
-    running — False when complete
-    """
     with _lock:
         elapsed = 0.0
         if _progress["start_time"]:
@@ -533,14 +518,8 @@ def get_progress():
 
 # ── RESULTS ENDPOINT ──────────────────────────────────────────────────────────
 
-
 @app.get("/results")
 def get_results():
-    """
-    Returns partial results mid-batch, full results when done.
-    Results are written after every batch so this is always fresh.
-    confidence and fake_score are 0.0–1.0 — multiply ×100 in the UI.
-    """
     return {
         "file_name": _file_name,
         "total":     len(_results),
@@ -573,24 +552,18 @@ def _top_keywords(texts: list[str], n: int = 8) -> list[str]:
 
 @app.get("/insights")
 async def get_insights():
-    """
-    Aggregate stats from _results and call the Anthropic API to generate
-    a plain-English executive summary.
-    avg_conf is computed from 0.0–1.0 confidence values and shown as %.
-    """
     with _lock:
         results = _results[:]
 
     if not results:
         raise HTTPException(status_code=404, detail="No results available yet.")
 
-    total        = len(results)
-    sent_counts  : Counter = Counter(r.get("sentiment", "Neutral") for r in results)
-    fake_count   = sum(1 for r in results if r.get("fake_review") == "Fake")
+    total         = len(results)
+    sent_counts   : Counter = Counter(r.get("sentiment", "Neutral") for r in results)
+    fake_count    = sum(1 for r in results if r.get("fake_review") == "Fake")
     emotion_counts: Counter = Counter(r.get("emotion", "Unknown") for r in results)
     product_counts: Counter = Counter(r.get("product", "General") for r in results)
 
-    # confidence stored as 0.0–1.0 → multiply by 100 for display
     avg_conf = round(
         sum(float(r.get("confidence", 0)) for r in results) / total * 100, 1
     )
@@ -688,22 +661,11 @@ Rules:
 
 # ── DUPLICATES ENDPOINT ───────────────────────────────────────────────────────
 
-
 @app.get("/duplicates")
 def get_duplicates(
     near_threshold: float = 0.80,
     sem_threshold:  float = 0.85,
 ):
-    """
-    Run 3-stage duplicate detection over the current results:
-      Stage 1 — Exact match      (MD5 hash, O(n))
-      Stage 2 — Near-duplicate   (Jaccard on char 3-shingles, ≥ near_threshold)
-      Stage 3 — Semantic clone   (TF-IDF cosine similarity, ≥ sem_threshold)
-
-    Query params:
-      near_threshold  float 0-1  (default 0.80)
-      sem_threshold   float 0-1  (default 0.85)
-    """
     with _lock:
         results = _results[:]
 
@@ -734,7 +696,7 @@ def debug():
     except Exception as e:
         results["sentiment"] = f"FAILED: {e}"
 
-    results["emotion"] = "Neutral"  # Emotion model disabled
+    results["emotion"] = "Neutral"
 
     try:
         results["product"] = str(detect_product(test))

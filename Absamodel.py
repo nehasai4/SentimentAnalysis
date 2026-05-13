@@ -1,32 +1,41 @@
 """
-absa_model.py — Aspect-Based Sentiment Analysis (ABSA)
+Absamodel.py — Aspect-Based Sentiment Analysis (Memory-Optimised for Render 512MB)
+
+Changes vs previous version:
+  ✦ low_cpu_mem_usage=True passed via model_kwargs so the pipeline loader
+    doesn't transiently double RAM during weight allocation
+  ✦ torch.cuda.empty_cache() + gc.collect() after load to reclaim any
+    temporary allocations made by HuggingFace internals
+  ✦ Explicit unload() function so main.py can free ABSA RAM before
+    reloading the sentiment model after an /absa call
+  ✦ All other logic (keyword gate, INT8 quant, NLI hypotheses) unchanged
 
 Strategy: zero-shot NLI approach using a lightweight model.
   Model : typeform/distilbert-base-uncased-mnli  (~135MB, fast on CPU)
   Why   : No fine-tuning needed. We frame aspect sentiment as a
           natural language inference task:
-            premise  = the review text
+            premise   = the review text
             hypothesis = "The {aspect} is {polarity}."
           The model scores entailment vs contradiction to decide sentiment.
 
-i3 optimisations:
+i3 / free-tier optimisations:
   - DistilBERT (not BERT/RoBERTa) — 40% smaller, 60% faster on CPU
   - INT8 dynamic quantization applied at load time
   - max_length=128 for the NLI classifier
   - Only run aspects that are actually mentioned in the text (keyword gate)
     — avoids ~60-70% of NLI calls on typical reviews
-  - Batch all aspect hypotheses for a single review into one forward pass
+  - low_cpu_mem_usage=True prevents transient 2× RAM spike during load
 
-Aspects covered (extensible — just add to ASPECT_KEYWORDS):
+Aspects covered (extensible — just add to ASPECTS):
   battery, camera, display, sound, performance, price, delivery,
   build quality, customer service, software, design, size
 
 Returns list of:
-  { aspect, sentiment, confidence, mentioned }
-  where `mentioned` = True if a keyword matched (vs inferred by NLI only)
+  { aspect, sentiment, confidence, mentioned, snippet }
 """
 
 from __future__ import annotations
+import gc
 import re
 import torch
 from transformers import pipeline as hf_pipeline
@@ -38,20 +47,26 @@ MODEL_NAME = "typeform/distilbert-base-uncased-mnli"
 _pipe = None   # lazy-loaded
 
 
-def _load():
+def _load() -> None:
     global _pipe
+
     if _pipe is not None:
         return
 
     print(f"[absa_model] Loading {MODEL_NAME}…")
     try:
+        # ── KEY FIX: low_cpu_mem_usage=True via model_kwargs ─────────────────
+        # The pipeline() API forwards model_kwargs to from_pretrained(), which
+        # enables layer-by-layer allocation and prevents the transient 2× RAM
+        # spike that was killing Render instances during ABSA load.
         _pipe = hf_pipeline(
             "zero-shot-classification",
             model=MODEL_NAME,
-            device=-1,          # CPU
+            device=-1,                              # CPU
+            model_kwargs={"low_cpu_mem_usage": True},
         )
 
-        # INT8 quantization — ~2× faster on i3 CPU
+        # INT8 quantization — ~2× faster on i3/free-tier CPU
         try:
             _pipe.model = torch.quantization.quantize_dynamic(
                 _pipe.model,
@@ -62,16 +77,44 @@ def _load():
         except Exception as e:
             print(f"[absa_model] Quantization skipped: {e}")
 
+        # Reclaim any scratch memory used by HuggingFace during load
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         print("[absa_model] Ready")
+
     except Exception as e:
         print(f"[absa_model] Failed to load: {e}")
         _pipe = "fallback"
 
 
+def unload() -> None:
+    """
+    Release the ABSA model from RAM so the sentiment model can reload.
+
+    Call this at the end of every /absa handler so memory is freed
+    before the next request arrives (which may be a batch job that
+    needs the sentiment model).
+    """
+    global _pipe
+
+    if _pipe is None or _pipe == "fallback":
+        return
+
+    print("[absa_model] Unloading to free RAM…")
+    del _pipe
+    _pipe = None
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    print("[absa_model] Unloaded ✓")
+
+
 # ── Aspect definitions ─────────────────────────────────────────────────────────
-# Each aspect has a list of trigger keywords. If NONE of these appear in the
-# review text (case-insensitive), we skip NLI for that aspect entirely.
-# This is the biggest speed win on i3 — avoids ~65% of forward passes.
+# Each aspect has a list of trigger keywords. If NONE appear in the review text
+# (case-insensitive) we skip NLI for that aspect entirely — the biggest speed
+# win on CPU, avoiding ~65% of forward passes on typical reviews.
 
 ASPECTS: dict[str, list[str]] = {
     "Battery":          ["battery", "charge", "charging", "power", "drain", "last", "life"],
@@ -88,7 +131,7 @@ ASPECTS: dict[str, list[str]] = {
     "Size / Weight":    ["size", "weight", "heavy", "light", "compact", "large", "small", "portable", "pocket"],
 }
 
-# NLI hypothesis templates — we compare "positive" vs "negative" entailment
+# NLI hypothesis templates — compare "positive" vs "negative" entailment scores
 _HYP_POS = "The {aspect} is good."
 _HYP_NEG = "The {aspect} is bad."
 
@@ -105,11 +148,11 @@ def analyse_aspects(text: str) -> list[dict]:
         "sentiment":   str,           # "Positive" | "Negative" | "Neutral"
         "confidence":  float,         # 0.0–1.0
         "mentioned":   bool,          # True = keyword matched in text
-        "snippet":     str | None,    # short sentence fragment containing the keyword
+        "snippet":     str | None,    # sentence fragment containing the keyword
       }
 
-    Only aspects that are either keyword-mentioned OR have very strong
-    NLI signal are returned — we don't return every aspect for every review.
+    Only aspects whose keywords appear in the text are evaluated.
+    Results are sorted: Negative first (most actionable), then Positive, Neutral.
     """
     if not text or not text.strip():
         return []
@@ -117,16 +160,20 @@ def analyse_aspects(text: str) -> list[dict]:
     _load()
 
     text_lower = text.lower()
-    results    = []
+    results: list[dict] = []
 
     for aspect, keywords in ASPECTS.items():
+
         # ── Keyword gate ──────────────────────────────────────────────────────
+        # Skip NLI entirely if no keyword is present — avoids ~65% of
+        # expensive forward passes on typical product reviews.
         matched_kw = next((kw for kw in keywords if kw in text_lower), None)
         if matched_kw is None:
-            continue   # skip NLI entirely — huge speed win
+            continue
 
         snippet = _extract_snippet(text, matched_kw)
 
+        # ── Fallback mode (model failed to load) ──────────────────────────────
         if _pipe == "fallback":
             results.append({
                 "aspect":     aspect,
@@ -138,8 +185,6 @@ def analyse_aspects(text: str) -> list[dict]:
             continue
 
         # ── NLI inference ─────────────────────────────────────────────────────
-        # Run both hypotheses (positive + negative) in one call.
-        # The pipeline handles multi-label scoring via entailment probabilities.
         try:
             out = _pipe(
                 text,
@@ -156,10 +201,11 @@ def analyse_aspects(text: str) -> list[dict]:
             pos_score    = label_scores.get(_HYP_POS.format(aspect=aspect), 0.0)
             neg_score    = label_scores.get(_HYP_NEG.format(aspect=aspect), 0.0)
 
-            # Determine sentiment
-            if abs(pos_score - neg_score) < 0.15:
+            gap = abs(pos_score - neg_score)
+
+            if gap < 0.15:
                 sentiment  = "Neutral"
-                confidence = round(1.0 - abs(pos_score - neg_score), 3)
+                confidence = round(1.0 - gap, 3)
             elif pos_score > neg_score:
                 sentiment  = "Positive"
                 confidence = round(pos_score, 3)
@@ -201,15 +247,14 @@ def analyse_aspects_batch(texts: list[str]) -> list[list[dict]]:
 
 def _extract_snippet(text: str, keyword: str) -> str | None:
     """
-    Extract the sentence (or up to 80 chars) around a keyword.
-    Used for displaying context in the UI.
+    Extract the sentence (or up to ~90 chars) containing a keyword.
+    Used for displaying context snippets in the UI.
     """
     sentences = re.split(r"(?<=[.!?])\s+", text)
     for sent in sentences:
         if keyword in sent.lower():
             sent = sent.strip()
             if len(sent) > 90:
-                # Find keyword position and trim around it
                 idx   = sent.lower().find(keyword)
                 start = max(0, idx - 30)
                 end   = min(len(sent), idx + 60)
