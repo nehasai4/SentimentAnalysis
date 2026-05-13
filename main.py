@@ -28,10 +28,13 @@ from collections import Counter
 import re
 import httpx
 
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
-os.environ["HF_DATASETS_OFFLINE"] = "1"
+# NOTE: Do NOT set TRANSFORMERS_OFFLINE=1 here.
+# On a fresh Render deploy the model cache may not exist yet, and forcing
+# offline mode causes a hard crash before any endpoint can respond.
+# Models are cached after the first successful download; subsequent cold-starts
+# load from disk automatically without needing this flag.
 
-from sentiment_model import predict_sentiment, predict_sentiment_batch
+from sentiment_model import predict_sentiment, predict_sentiment_batch, unload as _unload_sentiment
 from product_detection import detect_product
 from fake_review import detect_fake, detect_fake_explained
 from Duplicatedetection import detect_duplicates
@@ -263,18 +266,20 @@ def home():
 def health():
     """
     Lightweight warmup endpoint — returns 200 immediately with no model calls.
-
-    The Streamlit frontend polls this on load so it can show a "Warming up…"
-    spinner instead of "Backend offline" during Render cold-starts (which can
-    take 30–60 s while PyTorch models are loaded).
-
-    Render free-tier instances sleep after 15 min of inactivity.  Hitting
-    /health is cheap and wakes the instance before the user hits a real endpoint.
+    Reports current RAM usage so memory issues can be monitored on Render.
     """
+    mem_mb = None
+    try:
+        import psutil as _psutil, os as _os2
+        mem_mb = round(_psutil.Process(_os2.getpid()).memory_info().rss / 1024 / 1024, 1)
+    except Exception:
+        pass
+
     return {
         "status":  "ok",
         "version": "6.0.0",
         "device":  "GPU" if torch.cuda.is_available() else "CPU",
+        "ram_mb":  mem_mb,
     }
 
 
@@ -312,6 +317,9 @@ async def absa_single(request: Request, req: TextRequest):
     """
     try:
         from Absamodel import analyse_aspects
+        # Free the sentiment model before loading ABSA — both together exceed
+        # Render free tier's 512MB RAM limit. Sentiment reloads on next batch call.
+        _unload_sentiment()
         aspects = analyse_aspects(req.text)
         return {"aspects": aspects}
     except Exception as e:
@@ -631,7 +639,11 @@ Rules:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 ANTHROPIC_API_URL,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type":      "application/json",
+                    "x-api-key":         os.environ.get("ANTHROPIC_API_KEY", ""),
+                    "anthropic-version": "2023-06-01",
+                },
                 json={
                     "model":      "claude-sonnet-4-20250514",
                     "max_tokens": 300,
