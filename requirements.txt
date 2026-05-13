@@ -18,3 +18,4 @@ httpx
 scikit-learn
 accelerate
 python-dotenv
+slowapi
