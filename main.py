@@ -30,7 +30,6 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import pandas as pd
 import threading
-import concurrent.futures
 import time
 import io
 import torch
@@ -92,7 +91,7 @@ BATCH_SIZE = int(os.environ.get("BATCH_SIZE", _default_batch))
 
 EMA_ALPHA = 0.2
 
-_model_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+# Serialized batch processing — no ThreadPoolExecutor needed
 
 # ── MEMORY FIX: cap PyTorch threads ──────────────────────────────────────────
 # On Render's shared CPUs, spawning too many threads wastes RAM on stacks and
@@ -388,14 +387,15 @@ async def upload_csv(
 
 def _process_batch(reviews: list[str]) -> None:
     """
-    Processes reviews in parallel batches:
-      1. Sentiment model (transformer, batched)
-      2. Product detection (rule-based, batched)
-      3. Fake detection (rule-based, batched)
+    Processes reviews in sequential batches:
+      1. Sentiment model (DistilBERT INT8, batched)
+      2. Product detection (rule-based, sequential — no RAM cost)
+      3. Fake detection (rule-based, sequential — no RAM cost)
 
-    Memory fix: calls _unload_sentiment() in the finally block so the
-    ~125MB RoBERTa model is freed from RAM as soon as the job completes.
-    The model reloads automatically on the next /analyze_text call.
+    Sequential instead of parallel: running all three concurrently caused
+    peak RSS spikes that OOM-killed Render free-tier (512MB).
+    Product/fake are pure-Python; serializing them costs <1ms per batch.
+    Calls _unload_sentiment() in the finally block to free RAM after the job.
     """
     global _results
 
@@ -409,12 +409,14 @@ def _process_batch(reviews: list[str]) -> None:
 
             batch_t0 = time.time()
 
-            future_sent    = _model_executor.submit(predict_sentiment_batch, batch)
-            future_product = _model_executor.submit(_detect_product_batch,   batch)
-            future_fake    = _model_executor.submit(_detect_fake_batch,      batch)
-
+            # ── MEMORY FIX: run sequentially, not concurrently ────────────────────
+            # Running sentiment + product + fake in 3 threads simultaneously
+            # caused peak RSS spikes that OOM-killed the Render free-tier instance.
+            # Product and fake detection are pure-Python rule-based (no tensors),
+            # so serializing them costs <1ms per batch — the throughput impact is
+            # negligible compared to the transformer forward pass.
             try:
-                raw_sentiments = future_sent.result(timeout=120)
+                raw_sentiments = predict_sentiment_batch(batch)
             except Exception as e:
                 print(f"[WARN] Sentiment batch {batch_start} failed: {e}")
                 raw_sentiments = [("Error", 0.0)] * len(batch)
@@ -422,13 +424,13 @@ def _process_batch(reviews: list[str]) -> None:
             raw_emotions = ["Neutral"] * len(batch)
 
             try:
-                products = future_product.result(timeout=120)
+                products = _detect_product_batch(batch)
             except Exception as e:
                 print(f"[WARN] Product batch {batch_start} failed: {e}")
                 products = [("General", 0)] * len(batch)
 
             try:
-                fakes = future_fake.result(timeout=120)
+                fakes = _detect_fake_batch(batch)
             except Exception as e:
                 print(f"[WARN] Fake batch {batch_start} failed: {e}")
                 fakes = [("Real", 0.0)] * len(batch)
